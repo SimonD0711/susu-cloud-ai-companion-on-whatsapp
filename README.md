@@ -2,13 +2,15 @@
 
 SimonDPhotograph 的网站源码与部署文件。
 
-当前包含：
+![SimonDPhotograph Preview](./thumbs/DSC_0399.JPG)
+
+当前线上入口：
 
 - 首页：`https://simond.photo/`
 - 摄影作品页：`https://simond.photo/cheungchau.html`
 - 站主统计页：`https://simond.photo/admin-stats.html`
 - 摄影站 API：`https://simond.photo/api/...`
-- Gemini 子站反代相关配置
+- Gemini 子站：`https://gemini.simond.photo/`
 
 ## 目录说明
 
@@ -33,7 +35,7 @@ SimonDPhotograph 的网站源码与部署文件。
 
 ## 站主功能
 
-站主权限现已统一到 `simond.photo` 根域名下，主要接口包括：
+站主权限统一挂在 `simond.photo` 根域名下，主要接口包括：
 
 - `/api/admin/status`
 - `/api/admin/login`
@@ -43,21 +45,77 @@ SimonDPhotograph 的网站源码与部署文件。
 
 站主登录后可在首页、作品页和统计页共用登录状态。
 
+## 本地开发
+
+如果只需要改静态页面，直接编辑这些文件即可：
+
+- `index.html`
+- `cheungchau.html`
+- `admin-stats.html`
+
+如果需要改摄影站接口：
+
+- 编辑 `api_server.py`
+- 同步到服务器后重启 `cheungchau-api`
+
 ## 部署说明
 
 当前线上服务器：
 
-- Host: `Tokyo`
+- SSH Host: `Tokyo`
 - Domain: `simond.photo`
+- Web Root: `/var/www/html`
+- API Service: `cheungchau-api`
 
-常用部署方式：
+### 常用文件上传
 
 ```powershell
 scp .\index.html Tokyo:/var/www/html/index.html
 scp .\cheungchau.html Tokyo:/var/www/html/cheungchau.html
 scp .\admin-stats.html Tokyo:/var/www/html/admin-stats.html
 scp .\api_server.py Tokyo:/var/www/html/api_server.py
+scp .\robots.txt Tokyo:/var/www/html/robots.txt
+scp .\sitemap.xml Tokyo:/var/www/html/sitemap.xml
+```
+
+### 上传整组静态资源
+
+```powershell
+scp -r .\thumbs Tokyo:/var/www/html/
+scp -r .\cheungchaw Tokyo:/var/www/html/
+scp -r .\vendor Tokyo:/var/www/html/
+```
+
+### 服务重启
+
+```powershell
 ssh Tokyo "systemctl restart cheungchau-api"
+ssh Tokyo "systemctl reload nginx"
+```
+
+### 检查线上状态
+
+```powershell
+ssh Tokyo "systemctl is-active cheungchau-api"
+ssh Tokyo "nginx -t"
+ssh Tokyo "curl -I -s https://simond.photo/"
+ssh Tokyo "curl -I -s https://simond.photo/cheungchau.html"
+ssh Tokyo "curl -I -s https://simond.photo/admin-stats.html"
+```
+
+### 典型发布流程
+
+```powershell
+git status
+git add .
+git commit -m "your message"
+git push
+
+scp .\index.html Tokyo:/var/www/html/index.html
+scp .\cheungchau.html Tokyo:/var/www/html/cheungchau.html
+scp .\admin-stats.html Tokyo:/var/www/html/admin-stats.html
+scp .\api_server.py Tokyo:/var/www/html/api_server.py
+ssh Tokyo "systemctl restart cheungchau-api && systemctl reload nginx"
 ```
 
 ## Git 工作流
@@ -69,7 +127,16 @@ git commit -m "your message"
 git push
 ```
 
+当前默认分支：
+
+- `main`
+
 ## 备注
 
 - `backups/` 不纳入 Git 版本库
 - `remote-*.conf` 为临时远端配置副本，不纳入 Git 版本库
+- 当前仓库已接到 GitHub：`https://github.com/SimonD0711/simond-photo.git`
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](./LICENSE).
