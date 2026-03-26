@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-Hant-HK">
 <head>
   <meta charset="UTF-8">
@@ -14,6 +14,7 @@
   <meta name="twitter:card" content="summary_large_image">
   <link rel="canonical" href="https://simond.photo/">
   <link rel="preload" as="image" href="/thumbs/DSC_0399.JPG">
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
   <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -385,6 +386,181 @@
       line-height: 1.8;
     }
 
+    .collection-map {
+      padding: 16px;
+    }
+
+    .collection-map-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .collection-map-head strong {
+      font-size: 1.1rem;
+    }
+
+    .collection-map-head span {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .collection-map-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .collection-map-canvas {
+      position: relative;
+      min-height: 360px;
+      overflow: hidden;
+      border-radius: 24px;
+      border: 1px solid rgba(31, 111, 178, 0.08);
+      background:
+        radial-gradient(circle at 28% 24%, rgba(92, 214, 221, 0.22), transparent 22%),
+        linear-gradient(180deg, rgba(220, 241, 249, 0.92) 0%, rgba(197, 225, 240, 0.95) 100%);
+    }
+
+    .collection-map-canvas .leaflet-top.leaflet-left {
+      top: 12px;
+      left: 12px;
+    }
+
+    .collection-map-canvas .leaflet-control-zoom {
+      border: 1px solid rgba(31, 111, 178, 0.14);
+      border-radius: 18px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.86);
+      box-shadow: 0 18px 32px rgba(70, 124, 150, 0.18);
+      backdrop-filter: blur(12px);
+    }
+
+    .collection-map-canvas .leaflet-control-zoom a,
+    .collection-map-canvas .leaflet-touch .leaflet-control-zoom a {
+      width: 38px;
+      height: 38px;
+      line-height: 38px;
+      border: none;
+      color: var(--text);
+      background: transparent;
+      font-size: 22px;
+      font-weight: 500;
+    }
+
+    .collection-map-canvas .leaflet-control-zoom a + a {
+      border-top: 1px solid rgba(31, 111, 178, 0.08);
+    }
+
+    .collection-map-canvas .leaflet-bottom.leaflet-right {
+      right: 12px;
+      bottom: 10px;
+    }
+
+    .collection-map-canvas .leaflet-control-attribution {
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 111, 178, 0.1);
+      background: rgba(255, 255, 255, 0.8);
+      color: var(--muted);
+      font-size: 11px;
+      backdrop-filter: blur(10px);
+    }
+
+    .collection-map-canvas .leaflet-control-attribution a {
+      color: var(--accent);
+    }
+
+    .collection-map-list {
+      display: grid;
+      gap: 14px;
+      max-height: 360px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .collection-map-item {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr);
+      gap: 14px;
+      padding: 14px;
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.78);
+      border: 1px solid rgba(31, 111, 178, 0.1);
+    }
+
+    .collection-map-item img {
+      width: 92px;
+      height: 92px;
+      border-radius: 16px;
+      object-fit: cover;
+      background: #d5e8f6;
+    }
+
+    .collection-map-item strong {
+      display: block;
+      font-size: 1rem;
+      margin-bottom: 6px;
+    }
+
+    .collection-map-item p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.75;
+    }
+
+    .collection-map-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .collection-map-links a,
+    .collection-map-links button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 36px;
+      padding: 0 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 111, 178, 0.12);
+      background: rgba(255, 255, 255, 0.84);
+      color: var(--accent);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .collection-map-marker {
+      width: 42px;
+      height: 42px;
+      border: none;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--accent-soft) 0%, #4a8df4 100%);
+      color: #fff;
+      box-shadow: 0 10px 22px rgba(74, 141, 244, 0.28);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+    }
+
+    .collection-map-marker.is-active,
+    .collection-map-marker:hover,
+    .collection-map-marker:focus-visible {
+      transform: scale(1.06);
+      box-shadow: 0 14px 28px rgba(74, 141, 244, 0.34);
+    }
+
+    .collection-map-empty {
+      color: var(--muted);
+      line-height: 1.8;
+    }
+
     .collection-grid {
       display: grid;
       grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
@@ -537,6 +713,7 @@
     @media (max-width: 980px) {
       .hero,
       .collection-grid,
+      .collection-map-layout,
       .collection-card,
       .about-grid,
       .section-head {
@@ -565,6 +742,10 @@
 
       .hero-photo {
         min-height: 300px;
+      }
+
+      .collection-map-list {
+        max-height: none;
       }
     }
 
@@ -701,6 +882,17 @@
         </div>
       </section>
 
+      <section class="section collection-map" id="collection-map-section" hidden>
+        <div class="collection-map-head">
+          <strong>影集地圖</strong>
+          <span id="collection-map-count">整理中</span>
+        </div>
+        <div class="collection-map-layout">
+          <div class="collection-map-canvas" id="collection-map-canvas" aria-label="攝影集位置地圖"></div>
+          <div class="collection-map-list" id="collection-map-list"></div>
+        </div>
+      </section>
+
       <section class="section" id="featured">
         <div class="section-head">
           <div>
@@ -779,11 +971,16 @@
     </div>
   </div>
 
+  <script src="/vendor/leaflet/leaflet.js"></script>
   <script>
     (async function () {
       const adminStatus = document.getElementById("admin-status");
       const adminStatsLink = document.getElementById("admin-stats-link");
       const ownerPanelStats = document.getElementById("owner-panel-stats");
+      const collectionMapSection = document.getElementById("collection-map-section");
+      const collectionMapCanvas = document.getElementById("collection-map-canvas");
+      const collectionMapList = document.getElementById("collection-map-list");
+      const collectionMapCount = document.getElementById("collection-map-count");
       const adminLoginButton = document.getElementById("admin-login");
       const adminLogoutButton = document.getElementById("admin-logout");
       const adminModal = document.getElementById("admin-modal");
@@ -792,6 +989,8 @@
       const adminLoginCancel = document.getElementById("admin-login-cancel");
       const adminLoginError = document.getElementById("admin-login-error");
       const adminState = { authenticated: false, display_name: "SimonD（站主）" };
+      let homeMap = null;
+      let activeMarkerButton = null;
 
       function syncAdminEntry() {
         adminStatus.textContent = adminState.authenticated ? `已登入：${adminState.display_name}` : "訪客模式";
@@ -842,6 +1041,150 @@
         window.location.reload();
       }
 
+      async function fetchClientContext() {
+        const response = await fetch("/api/client-context");
+        if (!response.ok) throw new Error("Failed to load client context");
+        return response.json();
+      }
+
+      async function fetchCollectionsMap() {
+        const response = await fetch("/api/collections-map");
+        if (!response.ok) throw new Error("Failed to load collection map");
+        return response.json();
+      }
+
+      function buildCollectionMap(collectionPayload, clientContext) {
+        const collections = Array.isArray(collectionPayload?.collections) ? collectionPayload.collections : [];
+        if (!collectionMapSection || !collectionMapCanvas || !collectionMapList || !collectionMapCount) return;
+        if (!collections.length) {
+          collectionMapSection.hidden = false;
+          collectionMapCount.textContent = "暫時未有可標注影集";
+          collectionMapList.innerHTML = '<div class="collection-map-empty">之後新增有 GPS 定位的攝影集後，首頁地圖會自動把它們整理到這裡。</div>';
+          return;
+        }
+
+        collectionMapSection.hidden = false;
+        collectionMapCount.textContent = `${collections.length} 組影集已同步到首頁地圖`;
+        collectionMapList.innerHTML = "";
+
+        if (homeMap) {
+          homeMap.remove();
+        }
+        homeMap = L.map(collectionMapCanvas, {
+          zoomControl: true,
+          scrollWheelZoom: true
+        });
+
+        const tileUrl = clientContext?.is_mainland_china
+          ? "/api/map-tile/{z}/{x}/{y}"
+          : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+        L.tileLayer(tileUrl, {
+          detectRetina: true,
+          maxZoom: 19,
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        }).addTo(homeMap);
+
+        const points = collections.map((item, index) => ({
+          ...item,
+          index: index + 1,
+          lat: Number(item.center_lat),
+          lng: Number(item.center_lng)
+        })).filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lng));
+
+        const clusterMap = new Map();
+        const normalizedPoints = points.map((point) => {
+          const key = `${point.lat.toFixed(5)},${point.lng.toFixed(5)}`;
+          const cluster = clusterMap.get(key) || [];
+          const clusterIndex = cluster.length;
+          cluster.push(point);
+          clusterMap.set(key, cluster);
+          return { ...point, clusterKey: key, clusterIndex };
+        }).map((point) => {
+          const cluster = clusterMap.get(point.clusterKey) || [point];
+          const clusterSize = cluster.length;
+          const radius = clusterSize > 1 ? Math.min(0.0024, 0.0014 + ((clusterSize - 2) * 0.0004)) : 0;
+          const angle = clusterSize > 1 ? (Math.PI * 2 * point.clusterIndex) / clusterSize : 0;
+          return {
+            ...point,
+            markerLat: point.lat + Math.sin(angle) * radius,
+            markerLng: point.lng + Math.cos(angle) * radius
+          };
+        });
+
+        function setActiveMarker(nextButton) {
+          if (activeMarkerButton) {
+            activeMarkerButton.classList.remove("is-active");
+          }
+          activeMarkerButton = nextButton || null;
+          activeMarkerButton?.classList.add("is-active");
+        }
+
+        normalizedPoints.forEach((item) => {
+          const marker = L.marker([item.markerLat, item.markerLng], {
+            icon: L.divIcon({
+              className: "",
+              html: `<button class="collection-map-marker" type="button" aria-label="${item.title} 位置">${String(item.index).padStart(2, "0")}</button>`,
+              iconSize: [42, 42],
+              iconAnchor: [21, 21]
+            })
+          }).addTo(homeMap);
+
+          const markerButton = marker.getElement()?.querySelector(".collection-map-marker") || null;
+          marker.on("click", () => {
+            setActiveMarker(markerButton);
+          });
+
+          const card = document.createElement("article");
+          card.className = "collection-map-item";
+
+          const preview = document.createElement(item.cover ? "img" : "div");
+          if (item.cover) {
+            preview.src = item.cover;
+            preview.alt = item.title;
+            preview.loading = "lazy";
+            preview.decoding = "async";
+          } else {
+            preview.style.borderRadius = "16px";
+            preview.style.background = "#d5e8f6";
+          }
+          card.appendChild(preview);
+
+          const copy = document.createElement("div");
+          copy.innerHTML = `
+            <strong>${item.title}</strong>
+            <p>${item.description || "這組影集已經發布，首頁地圖會自動把它收進來。"}</p>
+            <p>${item.photo_count || 0} 張位置照片 · ${item.location_count || 0} 個拍攝點</p>
+          `;
+
+          const links = document.createElement("div");
+          links.className = "collection-map-links";
+
+          const jumpLink = document.createElement("a");
+          jumpLink.href = item.url;
+          jumpLink.textContent = "進入影集";
+          links.appendChild(jumpLink);
+
+          const focusButton = document.createElement("button");
+          focusButton.type = "button";
+          focusButton.textContent = "定位影集";
+          focusButton.addEventListener("click", () => {
+            homeMap.flyTo([item.markerLat, item.markerLng], Math.max(homeMap.getZoom(), 12), {
+              animate: true,
+              duration: 0.8
+            });
+            setActiveMarker(markerButton);
+          });
+          links.appendChild(focusButton);
+
+          copy.appendChild(links);
+          card.appendChild(copy);
+          collectionMapList.appendChild(card);
+        });
+
+        homeMap.fitBounds(points.map((item) => [item.lat, item.lng]), { padding: [26, 26] });
+        window.setTimeout(() => homeMap.invalidateSize(), 80);
+      }
+
       adminLoginButton.addEventListener("click", openAdminModal);
       adminLogoutButton.addEventListener("click", adminLogout);
       adminLoginCancel.addEventListener("click", closeAdminModal);
@@ -869,7 +1212,21 @@
         adminState.authenticated = false;
       }
       syncAdminEntry();
+      try {
+        const [clientContext, collectionsPayload] = await Promise.all([
+          fetchClientContext(),
+          fetchCollectionsMap()
+        ]);
+        buildCollectionMap(collectionsPayload, clientContext);
+      } catch (error) {
+        if (collectionMapSection && collectionMapCount && collectionMapList) {
+          collectionMapSection.hidden = false;
+          collectionMapCount.textContent = "影集地圖暫時不可用";
+          collectionMapList.innerHTML = '<div class="collection-map-empty">目前暫時無法讀取首頁影集地圖，稍後重新整理即可。</div>';
+        }
+      }
     })();
   </script>
 </body>
 </html>
+

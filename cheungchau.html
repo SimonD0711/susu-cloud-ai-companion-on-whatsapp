@@ -1552,6 +1552,7 @@
 
       const gallery = document.querySelector(".gallery");
       const cards = Array.from(document.querySelectorAll(".gallery .card"));
+      const viewedPhotos = new Set();
       const mobileMapQuery = window.matchMedia("(max-width: 800px)");
       let journeyMapInstance = null;
       let activeJourneyMarkerElement = null;
@@ -1561,6 +1562,16 @@
         return (photoOrder[aName] || "").localeCompare(photoOrder[bName] || "");
       });
       cards.forEach((card) => gallery.appendChild(card));
+
+      function trackPhotoView(photoId) {
+        if (!photoId || viewedPhotos.has(photoId)) return;
+        viewedPhotos.add(photoId);
+        fetch("/api/photo-view", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ photo_id: photoId })
+        }).catch(() => {});
+      }
 
       const cardEntries = cards.map((cardNode, index) => {
         const link = cardNode.querySelector(".thumb");
@@ -1598,6 +1609,8 @@
         }
         link.addEventListener("click", (event) => {
           event.preventDefault();
+          const photoId = decodeURIComponent(link.href.split("/").pop());
+          trackPhotoView(photoId);
           lightboxImage.src = link.href;
           lightboxImage.alt = link.querySelector("img")?.alt || "";
           lightboxCaption.textContent = link.dataset.lightbox || "";

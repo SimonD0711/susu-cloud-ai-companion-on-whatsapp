@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>找不到頁面 | SimonDPhotograph</title>
+  <meta name="robots" content="noindex,nofollow">
+  <style>
+    :root {
+      --text: #173649;
+      --muted: #5d7d90;
+      --line: rgba(160, 201, 221, 0.34);
+      --glass: rgba(255, 255, 255, 0.78);
+      --shadow: 0 24px 60px rgba(76, 132, 156, 0.16);
+      --accent: #1f6fb2;
+      --accent-soft: #5cd6dd;
+      --accent-warm: #f3a66e;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "PingFang HK", "Noto Sans TC", "Microsoft JhengHei UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 14% 12%, rgba(92, 214, 221, 0.26), transparent 22%),
+        radial-gradient(circle at 82% 18%, rgba(124, 180, 255, 0.2), transparent 24%),
+        linear-gradient(180deg, #f5fdff 0%, #e7f4fb 100%);
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .wrap {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 28px;
+    }
+
+    .shell {
+      width: min(1120px, 100%);
+    }
+
+    .site-header,
+    .hero,
+    .route-card {
+      border: 1px solid var(--line);
+      background: var(--glass);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .site-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      border-radius: 999px;
+      margin-bottom: 26px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand-mark {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, var(--accent-soft) 0%, #4a8df4 100%);
+      color: #fff;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }
+
+    .brand-copy {
+      display: grid;
+      gap: 2px;
+    }
+
+    .brand-copy strong {
+      font-size: 18px;
+    }
+
+    .brand-copy span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .nav {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .nav a,
+    .hero-actions a {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 18px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 111, 178, 0.16);
+      background: rgba(255, 255, 255, 0.76);
+      color: var(--accent);
+      transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+    }
+
+    .nav a:hover,
+    .hero-actions a:hover {
+      transform: translateY(-2px);
+    }
+
+    .hero {
+      border-radius: 34px;
+      padding: 34px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -80px -120px auto;
+      width: 280px;
+      height: 280px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(243, 166, 110, 0.22) 0%, rgba(243, 166, 110, 0) 70%);
+      pointer-events: none;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+      gap: 26px;
+      align-items: center;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      padding: 0 12px;
+      border-radius: 999px;
+      background: rgba(31, 111, 178, 0.1);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(42px, 7vw, 76px);
+      line-height: 0.96;
+      letter-spacing: -0.04em;
+    }
+
+    .hero p {
+      margin: 18px 0 0;
+      max-width: 700px;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.9;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-top: 28px;
+    }
+
+    .hero-actions .primary {
+      border-color: transparent;
+      background: linear-gradient(135deg, var(--accent-soft) 0%, #4a8df4 100%);
+      color: #fff;
+      box-shadow: 0 16px 32px rgba(74, 141, 244, 0.22);
+    }
+
+    .route-card {
+      border-radius: 28px;
+      padding: 26px;
+      position: relative;
+    }
+
+    .route-card svg {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .route-title {
+      margin: 0 0 10px;
+      font-size: 22px;
+    }
+
+    .route-copy {
+      color: var(--muted);
+      line-height: 1.8;
+      margin: 0 0 18px;
+    }
+
+    .route-points {
+      display: grid;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .route-points span {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .route-points span::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent-soft) 0%, #4a8df4 100%);
+      box-shadow: 0 0 0 5px rgba(92, 214, 221, 0.16);
+    }
+
+    @media (max-width: 920px) {
+      .site-header,
+      .hero-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .site-header {
+        border-radius: 26px;
+        align-items: flex-start;
+      }
+
+      .nav {
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .wrap {
+        padding: 16px;
+      }
+
+      .hero {
+        padding: 24px;
+        border-radius: 26px;
+      }
+
+      .site-header {
+        padding: 14px;
+      }
+
+      .brand-copy strong {
+        font-size: 17px;
+      }
+
+      .hero p {
+        font-size: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="shell">
+      <header class="site-header">
+        <a class="brand" href="/">
+          <span class="brand-mark">SD</span>
+          <span class="brand-copy">
+            <strong>SimonDPhotograph</strong>
+            <span>light, memory, atmosphere</span>
+          </span>
+        </a>
+        <nav class="nav">
+          <a href="/">返回首頁</a>
+          <a href="/cheungchau.html">回到長洲之旅</a>
+        </nav>
+      </header>
+
+      <section class="hero">
+        <div class="hero-grid">
+          <div>
+            <span class="eyebrow">404 · 找不到頁面</span>
+            <h1>這一頁<br>走失了。</h1>
+            <p>你要找的頁面可能已經移動、刪除，或者網址輸入有誤。先回主頁或長洲頁面，通常都能很快重新找到入口。</p>
+            <div class="hero-actions">
+              <a class="primary" href="/">回首頁</a>
+              <a href="/cheungchau.html">去長洲之旅</a>
+            </div>
+          </div>
+
+          <aside class="route-card">
+            <h2 class="route-title">重新找路</h2>
+            <p class="route-copy">把迷路這件事也做得輕一點。你可以先回到主頁看整體入口，或者直接跳回正在持續更新的作品頁。</p>
+            <svg viewBox="0 0 360 220" aria-hidden="true">
+              <defs>
+                <linearGradient id="routeLine" x1="0%" x2="100%" y1="0%" y2="100%">
+                  <stop offset="0%" stop-color="#5cd6dd"></stop>
+                  <stop offset="100%" stop-color="#4a8df4"></stop>
+                </linearGradient>
+              </defs>
+              <path d="M34 156 C76 94, 112 108, 150 132 S232 186, 274 122 S324 60, 328 78" fill="none" stroke="rgba(120, 168, 191, 0.24)" stroke-width="18" stroke-linecap="round"></path>
+              <path d="M34 156 C76 94, 112 108, 150 132 S232 186, 274 122 S324 60, 328 78" fill="none" stroke="url(#routeLine)" stroke-width="5" stroke-linecap="round" stroke-dasharray="1 12"></path>
+              <circle cx="34" cy="156" r="16" fill="#ffffff" stroke="#5cd6dd" stroke-width="5"></circle>
+              <circle cx="152" cy="133" r="16" fill="#ffffff" stroke="#7cb4ff" stroke-width="5"></circle>
+              <circle cx="274" cy="122" r="16" fill="#ffffff" stroke="#f3a66e" stroke-width="5"></circle>
+              <circle cx="328" cy="78" r="20" fill="#173649"></circle>
+              <path d="M319 79 l8 8 l14 -18" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+            <div class="route-points">
+              <span>主頁：看入口與最新整理</span>
+              <span>長洲之旅：直接回到主要作品頁</span>
+              <span>檢查網址：如果是手動輸入，通常這裡最容易出錯</span>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </div>
+  </div>
+</body>
+</html>
