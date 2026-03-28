@@ -2,7 +2,7 @@
 
 Susu Cloud: AI Companion on WhatsApp 是一个独立的开源仓库，包含：
 
-- `wa_agent.py`: WhatsApp webhook runtime，负责收消息、调模型、写入长期/短期记忆和提醒
+- `wa_agent.py`: WhatsApp webhook runtime，负责收消息、调模型、写入长期/短期/归档记忆和提醒
 - `susu_admin_server.py`: 轻量管理 API 和管理页面静态托管
 - `susu-memory-admin.html`: 记忆与提醒后台
 
@@ -13,10 +13,13 @@ Susu Cloud: AI Companion on WhatsApp 是一个独立的开源仓库，包含：
   接收 Meta WhatsApp Cloud API webhook 事件，处理文本与图片消息，写入本地 SQLite，并在短暂等待窗口后把连续消息合并成一次回复上下文。
 
 - 分层记忆系统
-  内建长期记忆 `wa_memories`、短期记忆 `wa_session_memories` 和提醒事项 `wa_reminders`。短期记忆会按 `24 小时 / 3 天 / 7 天` 自动分桶，方便回复时优先使用最近语境。
+  内建长期记忆 `wa_memories`、短期记忆 `wa_session_memories`、归档记忆 `wa_memory_archive` 和提醒事项 `wa_reminders`。短期记忆会按 `24 小时 / 3 天 / 7 天` 自动分桶，超过 7 天后自动转入归档层。
 
 - 自动记忆提取
   会从聊天内容里抽取适合长期保存的信息，以及只在最近几天内有价值的短期信息，减少每次都要重新提供用户背景。
+
+- 归档记忆检索
+  超过 7 天的短期记忆默认不进入日常 prompt，只有当用户追问「之前 / 上星期 / 上個月」这类旧事时，才会按关键词从归档层检索相关内容。
 
 - 提醒与主动消息能力
   支持从聊天中解析提醒请求并定时触发，也支持根据静默时长、回复窗口和时段策略生成主动消息，不只是被动问答。
@@ -31,7 +34,7 @@ Susu Cloud: AI Companion on WhatsApp 是一个独立的开源仓库，包含：
   支持气泡拆分、夜间/白天语气差异、引用回复、消息 reaction 和后续补句，输出形态更接近真实 WhatsApp 对话节奏。
 
 - 独立后台管理
-  `susu_admin_server.py` 提供轻量管理 API，`susu-memory-admin.html` 提供联系人、长期记忆、短期记忆、提醒事项的查看、编辑、删除和创建能力。
+  `susu_admin_server.py` 提供轻量管理 API，`susu-memory-admin.html` 提供联系人、长期记忆、短期记忆、归档记忆、提醒事项的查看、编辑、删除和创建能力。
 
 - 独立部署，不依赖大型框架
   整个项目基于 Python 标准库 HTTP 服务和 SQLite，可直接作为轻量服务运行，适合先快速部署、再逐步演进。
