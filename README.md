@@ -94,7 +94,13 @@ python .\susu_admin_server.py
 - `tools/hash_password.py`
 - `.env.example`
 - `PUBLIC_DEV_NOTES.md`
+- `Dockerfile`
 
 ## License
 
 MIT. See [LICENSE](./LICENSE).
+
+## Release And Package
+
+- GitHub Releases are published from tags like `v0.1.0`
+- GitHub Packages publishes a GHCR container image for this repository
