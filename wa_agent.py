@@ -14,6 +14,7 @@ import threading
 import traceback
 import textwrap
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -65,6 +66,9 @@ MINIMAX_BASE_URL = os.environ.get("WA_MINIMAX_BASE_URL", "https://api.minimaxi.c
 
 GROQ_API_KEY = os.environ.get("WA_GROQ_API_KEY") or os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("WA_GROQ_MODEL", "llama-3.3-70b-versatile")
+X_BEARER_TOKEN = os.environ.get("WA_X_BEARER_TOKEN", "")
+YOUTUBE_API_KEY = os.environ.get("WA_YOUTUBE_API_KEY", "")
+REDDIT_USER_AGENT = os.environ.get("WA_REDDIT_USER_AGENT", "SusuCloud/1.0")
 
 ADMIN_WA_ID = os.environ.get("WA_ADMIN_WA_ID", "85259576670")
 CLAUDE_WA_ID = os.environ.get("WA_CLAUDE_WA_ID", "8618704499898")
@@ -177,6 +181,34 @@ CHART_PREFERRED_DOMAINS = (
     "music.apple.com",
     "spotify.com",
 )
+NEWS_SOCIAL_PREFERRED_DOMAINS = (
+    "x.com",
+    "twitter.com",
+    "youtube.com",
+    "youtu.be",
+    "reddit.com",
+    "threads.net",
+)
+MUSIC_SOCIAL_PREFERRED_DOMAINS = (
+    "youtube.com",
+    "music.youtube.com",
+    "reddit.com",
+    "x.com",
+    "twitter.com",
+    "douyin.com",
+    "xiaohongshu.com",
+)
+PLATFORM_DOMAIN_HINTS = {
+    "x.com": ("twitter", "推特", "x.com", "x上", "x 上", "tweets"),
+    "twitter.com": ("twitter", "推特", "x.com", "x上", "x 上", "tweets"),
+    "youtube.com": ("youtube", "youtube music", "油管"),
+    "music.youtube.com": ("youtube", "youtube music", "油管"),
+    "reddit.com": ("reddit", "subreddit", "红迪", "紅迪"),
+    "threads.net": ("threads", "thread", "串串"),
+    "douyin.com": ("抖音", "douyin"),
+    "xiaohongshu.com": ("小红书", "小紅書", "rednote", "xiaohongshu"),
+    "mp.weixin.qq.com": ("微信", "wechat", "公众号", "公眾號", "公号", "公號"),
+}
 LIVE_SEARCH_SUMMARIZER_PROMPT = textwrap.dedent(
     """
     你係一個即時搜尋結果整理器。
@@ -832,6 +864,72 @@ def strip_search_tokens(text, tokens):
     return re.sub(r"\s+", " ", value).strip()
 
 
+def extract_explicit_platform_domains(text):
+    value = clean_text(text)
+    if not value:
+        return []
+    matched = []
+    for domain, hints in PLATFORM_DOMAIN_HINTS.items():
+        if contains_any_keyword(value, hints):
+            matched.append(domain)
+    return matched
+
+
+def strip_platform_tokens(text, domains=None):
+    active_domains = domains or PLATFORM_DOMAIN_HINTS.keys()
+    tokens = []
+    seen = set()
+    for domain in active_domains:
+        for token in PLATFORM_DOMAIN_HINTS.get(domain, ()):
+            key = token.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            tokens.append(token)
+    value = strip_search_tokens(normalize_search_entities(text), tuple(tokens))
+    return dedupe_search_terms(value or normalize_search_entities(text))
+
+
+def format_hk_datetime_label(value):
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).astimezone(HK_TZ).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ""
+    text = clean_text(value)
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(HK_TZ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return text
+
+
+def collect_provider_result_batches(loaders, timeout_seconds=12):
+    valid_loaders = [loader for loader in (loaders or []) if loader]
+    if not valid_loaders:
+        return []
+    batches = []
+    with ThreadPoolExecutor(max_workers=min(4, len(valid_loaders))) as executor:
+        futures = [executor.submit(loader) for loader in valid_loaders]
+        try:
+            for future in as_completed(futures, timeout=timeout_seconds):
+                try:
+                    value = future.result() or []
+                except Exception:
+                    value = []
+                if value:
+                    batches.append(value)
+        except Exception:
+            pass
+    return batches
+
+
 def is_music_query(text):
     value = normalize_search_entities(text)
     if not value:
@@ -1143,12 +1241,19 @@ def score_search_result(item, mode, query, index=0):
     )
     score = max(0, 30 - index)
     score += lexical_query_overlap_score(query, haystack)
+    explicit_platform_domains = extract_explicit_platform_domains(query)
+    if any(host_matches_domain(host, domain) for domain in explicit_platform_domains):
+        score += 18
     if mode == "news":
         domain_rank = find_domain_rank(host, HK_NEWS_PREFERRED_DOMAINS)
         if domain_rank is None:
             domain_rank = find_domain_rank(host, GLOBAL_NEWS_PREFERRED_DOMAINS)
             if domain_rank is not None:
                 score += max(6, 18 - domain_rank * 2)
+            else:
+                social_rank = find_domain_rank(host, NEWS_SOCIAL_PREFERRED_DOMAINS)
+                if social_rank is not None:
+                    score += max(2, 10 - social_rank)
         else:
             score += max(12, 28 - domain_rank * 3)
         if clean_text(item.get("published_at")):
@@ -1157,6 +1262,10 @@ def score_search_result(item, mode, query, index=0):
         domain_rank = find_domain_rank(host, MUSIC_PREFERRED_DOMAINS)
         if domain_rank is not None:
             score += max(8, 16 - domain_rank * 2)
+        else:
+            social_rank = find_domain_rank(host, MUSIC_SOCIAL_PREFERRED_DOMAINS)
+            if social_rank is not None:
+                score += max(2, 8 - social_rank)
         freshness_terms = ("最新", "新歌", "單曲", "单曲", "專輯", "专辑", "single", "album", "mv", "發行", "发行", "release", "released")
         if contains_any_keyword(haystack, freshness_terms):
             score += 12
@@ -1283,19 +1392,175 @@ def search_google_news(query, limit=5):
     return parse_google_news_results(xml_text, limit=limit)
 
 
-def search_music_results(query, limit=5, ranking_query=False):
-    web_results = cached_live_json(
-        ("duckduckgo_music", query),
-        lambda: search_duckduckgo_web(query, limit=max(limit * 2, 8)),
-        ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+def search_reddit_results(query, limit=5, sort="relevance"):
+    if not query:
+        return []
+    url = f"https://www.reddit.com/search.json?q={quote_plus(query)}&sort={quote_plus(sort)}&limit={max(1, min(int(limit), 10))}&raw_json=1"
+    try:
+        data = fetch_json_url(
+            url,
+            timeout=15,
+            headers={"User-Agent": REDDIT_USER_AGENT, "Accept": "application/json"},
+        )
+    except Exception:
+        return []
+    results = []
+    for row in (((data or {}).get("data") or {}).get("children") or []):
+        item = (row or {}).get("data") or {}
+        title = clean_text(item.get("title"))
+        if not title:
+            continue
+        permalink = clean_text(item.get("permalink"))
+        url = f"https://www.reddit.com{permalink}" if permalink.startswith("/") else clean_text(item.get("url"))
+        subreddit = clean_text(item.get("subreddit_name_prefixed") or item.get("subreddit"))
+        snippet = clean_text(item.get("selftext") or item.get("url") or item.get("domain"))
+        results.append(
+            {
+                "title": title,
+                "snippet": snippet,
+                "url": url,
+                "source": f"Reddit {subreddit}".strip() if subreddit else "Reddit",
+                "published_at": format_hk_datetime_label(item.get("created_utc")),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def search_x_recent_posts(query, limit=5):
+    if not X_BEARER_TOKEN or not query:
+        return []
+    core_query = strip_platform_tokens(query, ("x.com", "twitter.com"))
+    search_query = clean_text(core_query or query)
+    if "-is:retweet" not in search_query:
+        search_query = f"{search_query} -is:retweet"
+    url = (
+        "https://api.x.com/2/tweets/search/recent"
+        f"?query={quote_plus(search_query)}"
+        f"&max_results={max(10, min(int(limit), 10))}"
+        "&tweet.fields=created_at,author_id,lang"
+        "&expansions=author_id"
+        "&user.fields=name,username"
     )
-    news_results = cached_live_json(
-        ("google_news_music", query),
-        lambda: search_google_news(query, limit=max(limit, 5)),
-        ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+    try:
+        data = fetch_json_url(
+            url,
+            timeout=15,
+            headers={"Authorization": f"Bearer {X_BEARER_TOKEN}", "User-Agent": "SusuCloud/1.0"},
+        )
+    except Exception:
+        return []
+    users = {}
+    for user in (((data or {}).get("includes") or {}).get("users") or []):
+        user_id = clean_text(user.get("id"))
+        if user_id:
+            users[user_id] = user
+    results = []
+    for item in ((data or {}).get("data") or []):
+        tweet_id = clean_text(item.get("id"))
+        text = clean_text(item.get("text"))
+        if not tweet_id or not text:
+            continue
+        user = users.get(clean_text(item.get("author_id"))) or {}
+        username = clean_text(user.get("username"))
+        source = f"X @{username}" if username else "X"
+        if username:
+            post_url = f"https://x.com/{username}/status/{tweet_id}"
+        else:
+            post_url = f"https://x.com/i/status/{tweet_id}"
+        results.append(
+            {
+                "title": text[:100],
+                "snippet": text,
+                "url": post_url,
+                "source": source,
+                "published_at": format_hk_datetime_label(item.get("created_at")),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def search_youtube_videos(query, limit=5, order="date", published_after_days=None):
+    if not YOUTUBE_API_KEY or not query:
+        return []
+    core_query = strip_platform_tokens(query, ("youtube.com", "music.youtube.com"))
+    search_query = clean_text(core_query or query)
+    url = (
+        "https://www.googleapis.com/youtube/v3/search"
+        f"?part=snippet&type=video&q={quote_plus(search_query)}"
+        f"&maxResults={max(1, min(int(limit), 10))}"
+        f"&order={quote_plus(order)}"
+        "&regionCode=HK"
+        "&relevanceLanguage=zh-Hant"
+        f"&key={quote_plus(YOUTUBE_API_KEY)}"
+    )
+    if published_after_days:
+        published_after = (datetime.now(timezone.utc) - timedelta(days=int(published_after_days))).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url += f"&publishedAfter={quote_plus(published_after)}"
+    try:
+        data = fetch_json_url(url, timeout=20)
+    except Exception:
+        return []
+    results = []
+    for item in ((data or {}).get("items") or []):
+        snippet = (item or {}).get("snippet") or {}
+        video_id = clean_text(((item or {}).get("id") or {}).get("videoId"))
+        title = clean_text(snippet.get("title"))
+        if not video_id or not title:
+            continue
+        results.append(
+            {
+                "title": title,
+                "snippet": clean_text(snippet.get("description")),
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "source": clean_text(snippet.get("channelTitle")) or "YouTube",
+                "published_at": format_hk_datetime_label(snippet.get("publishedAt")),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def search_music_results(query, limit=5, ranking_query=False):
+    provider_batches = collect_provider_result_batches(
+        [
+            lambda: cached_live_json(
+                ("duckduckgo_music", query),
+                lambda: search_duckduckgo_web(query, limit=max(limit * 2, 8)),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+            lambda: cached_live_json(
+                ("google_news_music", query),
+                lambda: search_google_news(query, limit=max(limit, 5)),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+            lambda: cached_live_json(
+                ("youtube_music", query),
+                lambda: search_youtube_videos(query, limit=max(limit, 4), order="date", published_after_days=365),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+            lambda: cached_live_json(
+                ("reddit_music", query),
+                lambda: search_reddit_results(strip_platform_tokens(query, ("reddit.com",)), limit=max(limit, 4), sort="relevance"),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+            lambda: cached_live_json(
+                ("x_music", query),
+                lambda: search_x_recent_posts(query, limit=max(limit, 4)),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+        ],
+        timeout_seconds=14,
     )
     mode = "music_chart" if ranking_query else "music"
-    return rank_search_results((web_results or []) + (news_results or []), mode, query)[:limit]
+    merged = []
+    for batch in provider_batches:
+        merged.extend(batch or [])
+    return rank_search_results(merged, mode, query)[:limit]
 
 
 def extract_quoted_titles(text, max_titles=8):
@@ -1478,26 +1743,73 @@ def fetch_live_search_results(mode, search_query, effective_text):
             }
         ]
     if mode == "news":
-        return rank_search_results(
-            cached_live_json(
-                ("google_news", search_query),
-                lambda: search_google_news(search_query, limit=8),
-                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
-            ),
-            mode,
-            search_query,
+        provider_batches = collect_provider_result_batches(
+            [
+                lambda: cached_live_json(
+                    ("google_news", search_query),
+                    lambda: search_google_news(search_query, limit=8),
+                    ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+                ),
+                lambda: cached_live_json(
+                    ("reddit_news", search_query),
+                    lambda: search_reddit_results(strip_platform_tokens(search_query, ("reddit.com",)), limit=4, sort="new"),
+                    ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+                ),
+                lambda: cached_live_json(
+                    ("youtube_news", search_query),
+                    lambda: search_youtube_videos(search_query, limit=4, order="date", published_after_days=7),
+                    ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+                ),
+                lambda: cached_live_json(
+                    ("x_news", search_query),
+                    lambda: search_x_recent_posts(search_query, limit=4),
+                    ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+                ),
+            ],
+            timeout_seconds=14,
         )
+        merged = []
+        for batch in provider_batches:
+            merged.extend(batch or [])
+        return rank_search_results(merged, mode, search_query)
     if mode == "music":
         return search_music_results(search_query, limit=6, ranking_query=is_ranking_query(effective_text))
-    return rank_search_results(
-        cached_live_json(
+    explicit_domains = extract_explicit_platform_domains(effective_text or search_query)
+    provider_loaders = [
+        lambda: cached_live_json(
             ("duckduckgo_web", search_query),
             lambda: search_duckduckgo_web(search_query, limit=8),
             ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
         ),
-        mode,
-        search_query,
-    )
+    ]
+    if any(domain in explicit_domains for domain in ("reddit.com",)):
+        provider_loaders.append(
+            lambda: cached_live_json(
+                ("reddit_web", search_query),
+                lambda: search_reddit_results(strip_platform_tokens(search_query, ("reddit.com",)), limit=4, sort="relevance"),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            )
+        )
+    if any(domain in explicit_domains for domain in ("youtube.com", "music.youtube.com")):
+        provider_loaders.append(
+            lambda: cached_live_json(
+                ("youtube_web", search_query),
+                lambda: search_youtube_videos(search_query, limit=4, order="relevance", published_after_days=365),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            )
+        )
+    if any(domain in explicit_domains for domain in ("x.com", "twitter.com")):
+        provider_loaders.append(
+            lambda: cached_live_json(
+                ("x_web", search_query),
+                lambda: search_x_recent_posts(search_query, limit=4),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            )
+        )
+    merged = []
+    for batch in collect_provider_result_batches(provider_loaders, timeout_seconds=14):
+        merged.extend(batch or [])
+    return rank_search_results(merged, mode, search_query)
 
 
 def trim_search_snippet(text, max_length=110):
