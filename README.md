@@ -1,6 +1,6 @@
-# Susu Cloud
+# Susu Cloud: AI Companion on WhatsApp
 
-Susu Cloud 是一个独立的开源仓库，包含：
+Susu Cloud: AI Companion on WhatsApp 是一个独立的开源仓库，包含：
 
 - `wa_agent.py`: WhatsApp webhook runtime，负责收消息、调模型、写入长期/短期记忆和提醒
 - `susu_admin_server.py`: 轻量管理 API 和管理页面静态托管
