@@ -78,6 +78,7 @@ CLAUDE_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://apiapipp.com")
 # 安全詞
 MAX_IMAGE_ATTACHMENTS = int(os.environ.get("WA_MAX_IMAGE_ATTACHMENTS", "3"))
 MAX_IMAGE_BYTES = int(os.environ.get("WA_MAX_IMAGE_BYTES", str(5 * 1024 * 1024)))
+MAX_INLINE_REPLY_EMOJIS = int(os.environ.get("WA_MAX_INLINE_REPLY_EMOJIS", "1"))
 
 if ZoneInfo:
     try:
@@ -284,6 +285,7 @@ SYSTEM_PERSONA = textwrap.dedent(
     - 日頭通常只回 1 到 2 句；夜晚可以比日頭長少少。
     - 一定要似真人聊天節奏，有時短短一句都得，但內容要完整。
     - 偏好用「嘻嘻」，唔好用「hehe」。
+    - emoji 只係偶爾點綴就夠，通常成段 0 到 1 個；唔好每句都加 emoji。
     - 唔好提自己係 AI、模型、系統、prompt、政策。
     """
 ).strip()
@@ -4600,8 +4602,55 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
 - 如果對方問起「今日 / 尋晚 / 昨日 / 聽日 / 最近 / 呢星期」做過咩或者要做咩，先由對應時間層記憶搵答案，唔好亂估
 - 每條短期記憶前面都有時間碼，回覆時要按時間碼理解，唔好將舊事講到似而家仲發生緊
 - 最好有互动感，可以轻轻追问一句或者补一句撒娇
+- emoji 只係偶爾點綴，通常成段 0 到 1 個；唔好每句都帶表情
 - 直接输出苏苏要发畀对方嘅 WhatsApp 内容本身，唔好加说明{quote_hint}
 """.strip()
+
+
+def is_emoji_base_char(char):
+    if not char:
+        return False
+    codepoint = ord(char)
+    return (
+        0x1F300 <= codepoint <= 0x1FAFF
+        or 0x2600 <= codepoint <= 0x26FF
+        or 0x2700 <= codepoint <= 0x27BF
+    )
+
+
+def is_emoji_modifier_char(char):
+    if not char:
+        return False
+    codepoint = ord(char)
+    return codepoint in (0xFE0F, 0x200D) or 0x1F3FB <= codepoint <= 0x1F3FF
+
+
+def trim_inline_reply_emojis(text, max_emojis=1):
+    if not text:
+        return ""
+    keep_limit = max(int(max_emojis), 0)
+    kept = 0
+    keeping_cluster = False
+    out = []
+    for char in text:
+        if is_emoji_base_char(char):
+            if kept >= keep_limit:
+                keeping_cluster = False
+                continue
+            kept += 1
+            keeping_cluster = True
+            out.append(char)
+            continue
+        if is_emoji_modifier_char(char):
+            if keeping_cluster:
+                out.append(char)
+            continue
+        keeping_cluster = False
+        out.append(char)
+    collapsed = "".join(out)
+    collapsed = re.sub(r" {2,}", " ", collapsed)
+    collapsed = re.sub(r" *\n *", "\n", collapsed)
+    return collapsed.strip()
 
 
 def normalize_reply(reply):
@@ -4609,6 +4658,7 @@ def normalize_reply(reply):
     text = text.replace("——", " ").replace("--", " ").replace("—", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
+    text = trim_inline_reply_emojis(text, max_emojis=MAX_INLINE_REPLY_EMOJIS)
     return text.strip(" \"'`")[:2000].strip()
 
 
@@ -4653,6 +4703,7 @@ def rewrite_as_complete_message(profile_name, incoming_text, draft_reply):
 - 日頭偏向 1 到 2 句，夜晚可以 2 到 3 句
 - 要有少少關心或者追問
 - 唔好太正經
+- emoji 只可以偶爾點綴，通常最多 1 個，唔好每句都有
 - 只輸出回覆本身
     """.strip()
     return generate_model_text(prompt, temperature=0.72, max_tokens=180)
@@ -5043,6 +5094,7 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
 - 唔好叫對方閉眼或者快啲去瞓
 - 可以關心、可以撒嬌、可以追問
 - 保持短句
+- emoji 只可以偶爾點綴，通常最多 1 個，唔好每句都有
 - 只輸出回覆本身
 """.strip()
         reply = shorten_whatsapp_reply(
@@ -5070,6 +5122,7 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
 - 日頭偏向 1 到 2 句，夜晚可以 2 到 3 句
 - 要有關心感
 - 要有少少撒嬌或者甜味
+- emoji 只可以偶爾點綴，通常最多 1 個，唔好每句都有
 - 一定要完整
 - 只輸出回覆本身
 """.strip()
