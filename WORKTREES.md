@@ -15,8 +15,3 @@
 - `codex/openclaw-workspace`
   path: `C:\Users\ding7\Documents\gpt-openclaw-workspace`
   purpose: OpenClaw workspace files and Tokyo/WSL scripts
-
-Archived branch note:
-- `codex/local-wa-proxy`
-  no active worktree
-  deployment files merged into `codex/susu-cloud`; branch retained only as history snapshot
