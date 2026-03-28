@@ -1,9 +1,36 @@
 # Susu Cloud: AI Companion on WhatsApp
 
 [![Release](https://img.shields.io/github/v/release/SimonD0711/susu-cloud-ai-companion-on-whatsapp)](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/releases)
+[![License](https://img.shields.io/github/license/SimonD0711/susu-cloud-ai-companion-on-whatsapp)](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/blob/main/LICENSE)
 [![Package](https://img.shields.io/badge/GHCR-container-blue)](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/pkgs/container/susu-cloud-ai-companion-on-whatsapp)
 
-Susu Cloud: AI Companion on WhatsApp 是一个独立的开源仓库，包含：
+![Susu Cloud banner](./assets/susu-cloud-banner.svg)
+
+Susu Cloud is an open-source WhatsApp AI companion runtime built around a single conversational voice, layered memory, grounded live search, and a lightweight admin console.
+
+它是一个独立的开源仓库，专门把云端苏苏拆成可公开维护的运行时、后台 API 和浏览器管理页。
+
+## Overview
+
+| Area | What it provides |
+| --- | --- |
+| Runtime | `wa_agent.py` handles WhatsApp webhooks, memory writes, reminders, search, and replies |
+| Admin API | `susu_admin_server.py` exposes lightweight management endpoints |
+| Admin UI | `susu-memory-admin.html` manages memories, reminders, and runtime settings |
+| Model path | Public runtime is currently centered on `claude-opus-4-6` for reply generation |
+| Storage | SQLite by default, with runtime settings stored in DB |
+| Distribution | GitHub Releases and GHCR package publishing are built in |
+
+## Highlights
+
+- Opus-first conversational runtime tuned for a single companion voice, instead of a generic multi-bot stack
+- Layered memory with long-term, short-term, and archive tiers, plus reminder scheduling
+- Grounded live search with router, reviewer, query-refine, and abstain paths to reduce confident hallucinations
+- More natural WhatsApp pacing with batching, bubble splitting, read receipts, and persistent typing refresh
+- Lightweight browser admin for memories, reminders, and runtime settings
+- Public-safe repository layout with release automation and GHCR image publishing
+
+## Included Files
 
 - `wa_agent.py`: WhatsApp webhook runtime，负责收消息、调模型、写入长期/短期/归档记忆和提醒，并从数据库读取运行时设置
 - `susu_admin_server.py`: 轻量管理 API，支持记忆、提醒和运行设置读写
@@ -27,8 +54,11 @@ Susu Cloud: AI Companion on WhatsApp 是一个独立的开源仓库，包含：
 - 提醒与主动消息能力
   支持从聊天中解析提醒请求并定时触发，也支持根据静默时长、回复窗口和时段策略生成主动消息，不只是被动问答。
 
-- 多模型路由与回退
-  支持 Relay、Gemini、MiniMax、Groq 多个提供方。可以按顺序自动降级，在某个模型或 API 不可用时继续服务。
+- 单模型对话主链路
+  当前公开版正常对话主路径聚焦 `claude-opus-4-6`，避免在公开部署说明里混入过多历史后备路由，行为更稳定也更容易复现。
+
+- 联网搜索收敛链路
+  即时信息问题会先走轻量 router，再对搜索结果做 reviewer 判断；如果证据不够，会 refine query 或直接保守拒答，而不是自由发挥补事实。
 
 - 图片消息处理
   对 WhatsApp 图片消息做下载、分类和输入拼装，让回复逻辑能结合图片内容，而不只依赖纯文本。
@@ -44,6 +74,17 @@ Susu Cloud: AI Companion on WhatsApp 是一个独立的开源仓库，包含：
 
 - 配置与隐私解耦
   用户画像、管理员密码哈希、cookie secret、数据库路径、端口、模型 key 都通过 `.env` 注入，仓库本身不再携带个人资料或生产凭据；运行中的核心设定则可通过后台写入数据库，避免反复改代码或重启服务。
+
+## Project Layout
+
+- `wa_agent.py`
+- `susu_admin_server.py`
+- `susu-memory-admin.html`
+- `tools/hash_password.py`
+- `.env.example`
+- `PUBLIC_DEV_NOTES.md`
+- `Dockerfile`
+- `assets/susu-cloud-banner.svg`
 
 ## Quick Start
 
@@ -89,20 +130,6 @@ python .\susu_admin_server.py
 - `WA_PRIMARY_USER_MEMORY` / `WA_PRIMARY_USER_MEMORY_FILE` 用来注入你自己的用户画像，仓库本身不再带个人资料
 - `WA_CLAUDE_WA_ID` 对应的 Claude Code 流式代理能力是可选能力，依赖本机安装的 `claude` CLI 和相应运行环境
 
-## Files
-
-- `wa_agent.py`
-- `susu_admin_server.py`
-- `susu-memory-admin.html`
-- `tools/hash_password.py`
-- `.env.example`
-- `PUBLIC_DEV_NOTES.md`
-- `Dockerfile`
-
-## License
-
-MIT. See [LICENSE](./LICENSE).
-
 ## Release And Package
 
 - GitHub Releases are published from tags like `v0.1.0`
@@ -115,3 +142,7 @@ MIT. See [LICENSE](./LICENSE).
 docker pull ghcr.io/simond0711/susu-cloud-ai-companion-on-whatsapp:latest
 docker run --rm -p 9100:9100 --env-file .env ghcr.io/simond0711/susu-cloud-ai-companion-on-whatsapp:latest
 ```
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

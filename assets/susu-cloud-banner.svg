@@ -1,0 +1,90 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="96" y1="64" x2="1184" y2="576" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0C1A27"/>
+      <stop offset="0.55" stop-color="#11395C"/>
+      <stop offset="1" stop-color="#1C6886"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#FFFFFF" stop-opacity="0.2"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.08"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1012 172) rotate(90) scale(204 204)">
+      <stop stop-color="#FFB36A" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#FFB36A" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(344 520) rotate(90) scale(216 216)">
+      <stop stop-color="#72D9FF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#72D9FF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-40" y="-40" width="1360" height="720" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#00101E" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" rx="32" fill="url(#bg)"/>
+  <rect x="32" y="32" width="1216" height="576" rx="28" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+  <circle cx="1012" cy="172" r="204" fill="url(#glowA)"/>
+  <circle cx="344" cy="520" r="216" fill="url(#glowB)"/>
+  <path d="M948 88C1032 140 1128 264 1184 436" stroke="rgba(255,255,255,0.12)" stroke-width="2" stroke-dasharray="8 12"/>
+  <path d="M126 188C272 136 412 112 556 106" stroke="rgba(255,255,255,0.14)" stroke-width="2" stroke-dasharray="8 12"/>
+
+  <g filter="url(#shadow)">
+    <rect x="84" y="84" width="1112" height="472" rx="28" fill="rgba(7,15,24,0.22)"/>
+    <rect x="84.5" y="84.5" width="1111" height="471" rx="27.5" stroke="rgba(255,255,255,0.08)"/>
+  </g>
+
+  <g>
+    <rect x="126" y="124" width="148" height="38" rx="19" fill="rgba(255,255,255,0.12)"/>
+    <circle cx="152" cy="143" r="8" fill="#7CE1FF"/>
+    <text x="174" y="149" fill="#D9F6FF" font-family="'Segoe UI', Arial, sans-serif" font-size="18" font-weight="600">WhatsApp AI Companion</text>
+
+    <text x="126" y="248" fill="#FFFFFF" font-family="'Segoe UI', Arial, sans-serif" font-size="78" font-weight="700" letter-spacing="1.5">SUSU CLOUD</text>
+    <text x="126" y="302" fill="#BFE6F7" font-family="'Segoe UI', Arial, sans-serif" font-size="30" font-weight="500">Layered memory, grounded live search, and a lightweight admin console.</text>
+
+    <text x="126" y="384" fill="#9FD5EA" font-family="'Segoe UI', Arial, sans-serif" font-size="18" font-weight="500">Open-source runtime for a more human-feeling WhatsApp companion.</text>
+
+    <g>
+      <rect x="126" y="422" width="214" height="72" rx="22" fill="url(#card)"/>
+      <rect x="126.5" y="422.5" width="213" height="71" rx="21.5" stroke="rgba(255,255,255,0.12)"/>
+      <text x="152" y="452" fill="#FFFFFF" font-family="'Segoe UI', Arial, sans-serif" font-size="18" font-weight="700">Layered Memory</text>
+      <text x="152" y="478" fill="#B9D7E6" font-family="'Segoe UI', Arial, sans-serif" font-size="14">Long-term, short-term, archive</text>
+    </g>
+
+    <g>
+      <rect x="356" y="422" width="214" height="72" rx="22" fill="url(#card)"/>
+      <rect x="356.5" y="422.5" width="213" height="71" rx="21.5" stroke="rgba(255,255,255,0.12)"/>
+      <text x="382" y="452" fill="#FFFFFF" font-family="'Segoe UI', Arial, sans-serif" font-size="18" font-weight="700">Grounded Search</text>
+      <text x="382" y="478" fill="#B9D7E6" font-family="'Segoe UI', Arial, sans-serif" font-size="14">Router, reviewer, abstain path</text>
+    </g>
+
+    <g>
+      <rect x="586" y="422" width="214" height="72" rx="22" fill="url(#card)"/>
+      <rect x="586.5" y="422.5" width="213" height="71" rx="21.5" stroke="rgba(255,255,255,0.12)"/>
+      <text x="612" y="452" fill="#FFFFFF" font-family="'Segoe UI', Arial, sans-serif" font-size="18" font-weight="700">Admin Console</text>
+      <text x="612" y="478" fill="#B9D7E6" font-family="'Segoe UI', Arial, sans-serif" font-size="14">Memories, reminders, settings</text>
+    </g>
+  </g>
+
+  <g>
+    <rect x="850" y="132" width="270" height="334" rx="30" fill="rgba(8,18,29,0.46)"/>
+    <rect x="850.5" y="132.5" width="269" height="333" rx="29.5" stroke="rgba(255,255,255,0.14)"/>
+    <rect x="890" y="170" width="190" height="28" rx="14" fill="rgba(255,255,255,0.1)"/>
+    <circle cx="916" cy="184" r="6" fill="#FFB36A"/>
+    <text x="932" y="189" fill="#FFFFFF" font-family="'Segoe UI', Arial, sans-serif" font-size="15" font-weight="700">Susu Runtime</text>
+
+    <rect x="890" y="226" width="150" height="64" rx="22" fill="rgba(255,255,255,0.92)"/>
+    <text x="912" y="252" fill="#163452" font-family="'Segoe UI', Arial, sans-serif" font-size="14" font-weight="700">Message Batch</text>
+    <text x="912" y="274" fill="#365775" font-family="'Segoe UI', Arial, sans-serif" font-size="13">Read, merge, reply</text>
+
+    <rect x="930" y="308" width="150" height="64" rx="22" fill="#F7C992"/>
+    <text x="952" y="334" fill="#3B2A14" font-family="'Segoe UI', Arial, sans-serif" font-size="14" font-weight="700">Live Search</text>
+    <text x="952" y="356" fill="#5A4020" font-family="'Segoe UI', Arial, sans-serif" font-size="13">Grounded answers only</text>
+
+    <rect x="890" y="390" width="150" height="42" rx="21" fill="rgba(124,225,255,0.18)"/>
+    <text x="912" y="417" fill="#D9F6FF" font-family="'Segoe UI', Arial, sans-serif" font-size="14" font-weight="600">Typing kept alive</text>
+
+    <path d="M1074 259C1114 280 1128 321 1106 358" stroke="#FFDEA5" stroke-width="3" stroke-linecap="round"/>
+    <path d="M1088 351L1099 363L1116 345" stroke="#FFF5DF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

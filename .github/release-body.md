@@ -1,3 +1,5 @@
+![Susu Cloud banner](https://raw.githubusercontent.com/${REPOSITORY}/${REF_NAME}/assets/susu-cloud-banner.svg)
+
 ## Overview
 
 Susu Cloud is an open-source WhatsApp AI companion runtime with layered memory, live search, and a lightweight admin UI.
