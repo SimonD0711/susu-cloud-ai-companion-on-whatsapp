@@ -4662,6 +4662,19 @@ def normalize_reply(reply):
     return text.strip(" \"'`")[:2000].strip()
 
 
+def extract_quote_directive(reply_text):
+    text = (reply_text or "").replace("\r\n", "\n").replace("\r", "\n").lstrip()
+    if not text:
+        return "", ""
+    first_line, sep, remainder = text.partition("\n")
+    match = re.match(r"^QUOTE\s*:\s*(\S+)\s*$", first_line.strip(), flags=re.IGNORECASE)
+    if not match:
+        return "", text.strip()
+    quoted_message_id = clean_text(match.group(1))
+    cleaned_text = remainder.strip() if sep else ""
+    return quoted_message_id, cleaned_text
+
+
 def shorten_whatsapp_reply(reply, night_mode=False):
     text = normalize_reply(reply)
     if not text:
@@ -4987,7 +5000,8 @@ def process_pending_replies_for_contact(wa_id):
                 continue
 
             try:
-                bubbles = split_reply_bubbles(reply_text, night_mode=is_night_mode())
+                quoted_message_id, cleaned_reply_text = extract_quote_directive(reply_text)
+                bubbles = split_reply_bubbles(cleaned_reply_text or reply_text, night_mode=is_night_mode())
                 bubbles = maybe_stage_followup_bubbles(bubbles, night_mode=is_night_mode())
                 reaction_emoji = pick_susu_reaction(combined_text or "", night_mode=is_night_mode())
 
@@ -5010,7 +5024,10 @@ def process_pending_replies_for_contact(wa_id):
                         interrupted = True
                         break
 
-                    response = send_whatsapp_text(wa_id, bubble)
+                    if index == 0 and quoted_message_id:
+                        response = send_whatsapp_quote(wa_id, bubble, quoted_message_id)
+                    else:
+                        response = send_whatsapp_text(wa_id, bubble)
                     conn.execute(
                         """
                         INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at)
