@@ -39,6 +39,13 @@ jobs:
             type=ref,event=tag
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=Susu Cloud: AI Companion on WhatsApp
+            org.opencontainers.image.description=Open-source WhatsApp AI companion runtime with layered memory, live search, and a lightweight admin UI.
+            org.opencontainers.image.vendor=SimonD0711
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}#readme
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
 
       - name: Build and push
         uses: docker/build-push-action@v6

@@ -16,7 +16,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Build release body
+        shell: bash
+        run: |
+          sed \
+            -e 's|${REPOSITORY}|${{ github.repository }}|g' \
+            -e 's|${REF_NAME}|${{ github.ref_name }}|g' \
+            .github/release-body.md > release-body.md
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ github.ref_name }}
+          body_path: release-body.md
           generate_release_notes: true

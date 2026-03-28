@@ -1,0 +1,20 @@
+changelog:
+  categories:
+    - title: Runtime
+      labels:
+        - runtime
+    - title: Admin
+      labels:
+        - admin
+    - title: Search
+      labels:
+        - search
+    - title: Docs
+      labels:
+        - documentation
+    - title: Maintenance
+      labels:
+        - chore
+  exclude:
+    labels:
+      - skip-changelog

@@ -1,5 +1,8 @@
 # Susu Cloud: AI Companion on WhatsApp
 
+[![Release](https://img.shields.io/github/v/release/SimonD0711/susu-cloud-ai-companion-on-whatsapp)](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/releases)
+[![Package](https://img.shields.io/badge/GHCR-container-blue)](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/pkgs/container/susu-cloud-ai-companion-on-whatsapp)
+
 Susu Cloud: AI Companion on WhatsApp 是一个独立的开源仓库，包含：
 
 - `wa_agent.py`: WhatsApp webhook runtime，负责收消息、调模型、写入长期/短期/归档记忆和提醒，并从数据库读取运行时设置
@@ -104,3 +107,11 @@ MIT. See [LICENSE](./LICENSE).
 
 - GitHub Releases are published from tags like `v0.1.0`
 - GitHub Packages publishes a GHCR container image for this repository
+- Releases page: [GitHub Releases](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/releases)
+- Package page: [GHCR Container](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/pkgs/container/susu-cloud-ai-companion-on-whatsapp)
+- Image tags include version tags like `v0.1.0` and `latest`
+
+```bash
+docker pull ghcr.io/simond0711/susu-cloud-ai-companion-on-whatsapp:latest
+docker run --rm -p 9100:9100 --env-file .env ghcr.io/simond0711/susu-cloud-ai-companion-on-whatsapp:latest
+```
