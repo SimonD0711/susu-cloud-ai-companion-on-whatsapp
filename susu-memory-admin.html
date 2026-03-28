@@ -357,7 +357,7 @@
 
     <section class="panel">
       <h1>苏苏記憶管理</h1>
-      <p>直接管理目前 WhatsApp 版苏苏的真實資料庫：長期記憶 <code>wa_memories</code>、短期記憶 <code>wa_session_memories</code>、以及提醒事項 <code>wa_reminders</code>。</p>
+      <p>直接管理目前 WhatsApp 版苏苏的真實資料庫：長期記憶 <code>wa_memories</code>、短期記憶 <code>wa_session_memories</code>、歸檔記憶 <code>wa_memory_archive</code>、以及提醒事項 <code>wa_reminders</code>。</p>
       <div class="status-note" id="status-note">正在讀取記憶資料...</div>
       <div class="summary-grid">
         <div class="summary-card">
@@ -374,6 +374,11 @@
           <div class="summary-label">短期記憶</div>
           <div class="summary-value" id="stat-session">0</div>
           <div class="summary-sub" id="stat-session-sub">0 條仍有效</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">歸檔記憶</div>
+          <div class="summary-value" id="stat-archive">0</div>
+          <div class="summary-sub" id="stat-archive-sub">7 天後長期保留</div>
         </div>
         <div class="summary-card">
           <div class="summary-label">提醒事項</div>
@@ -394,6 +399,7 @@
       <div class="segmented">
         <button class="active" id="tab-long" type="button">長期記憶</button>
         <button id="tab-session" type="button">短期記憶</button>
+        <button id="tab-archive" type="button">歸檔記憶</button>
         <button id="tab-reminder" type="button">提醒事項</button>
       </div>
       <div class="section-meta" id="section-meta">長期記憶：由苏苏長期記住的內容</div>
@@ -504,6 +510,7 @@
   const TABS = {
     long: { key: 'long_term_memories', label: '長期記憶', text: '長期記憶：由苏苏長期記住的內容' },
     session: { key: 'session_memories', label: '短期記憶', text: '短期記憶：24 小時 / 3 天 / 1 週內的時間分層記憶' },
+    archive: { key: 'archived_memories', label: '歸檔記憶', text: '歸檔記憶：7 天後轉入，只在追問舊事時調取' },
     reminder: { key: 'reminders', label: '提醒事項', text: '提醒事項：等待觸發或已觸發的提醒' },
   };
   let payload = null;
@@ -621,6 +628,8 @@
     document.getElementById('stat-long').textContent = String(stats.long_term_count || 0);
     document.getElementById('stat-session').textContent = String(stats.session_count || 0);
     document.getElementById('stat-session-sub').textContent = `${stats.active_session_count || 0} 條有效 · 24h ${stats.recent_24h_count || 0} / 3d ${stats.recent_3d_count || 0} / 1w ${stats.recent_7d_count || 0}`;
+    document.getElementById('stat-archive').textContent = String(stats.archive_count || 0);
+    document.getElementById('stat-archive-sub').textContent = `${stats.archive_count || 0} 條已歸檔 · 7 天後永久保留`;
     document.getElementById('stat-reminder').textContent = String(stats.reminder_count || 0);
     document.getElementById('stat-reminder-sub').textContent = `${stats.pending_reminder_count || 0} 條未觸發`;
   }
@@ -676,6 +685,26 @@
     </div>
     <div class="entry-actions">
       <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="session" data-label="這條短期記憶">🗑️</button>
+    </div>
+  </div>
+  <div class="entry-body">${esc(item.content)}</div>
+</div>`;
+    }
+
+    if (activeTab === 'archive') {
+      return `
+<div class="entry-card">
+  <div class="entry-header">
+    <div class="entry-meta">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="entry-key session">${esc(item.source_bucket_label || item.source_bucket || 'within_7d')}</span>
+        ${badgeHtml('已歸檔', 'expired')}
+      </div>
+      <span class="entry-user">${esc(item.wa_id)}</span>
+      <span class="entry-time">發生：${fmt(item.observed_at || item.updated_at)} · 歸檔：${fmt(item.archived_at)}</span>
+    </div>
+    <div class="entry-actions">
+      <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="archive" data-label="這條歸檔記憶">🗏</button>
     </div>
   </div>
   <div class="entry-body">${esc(item.content)}</div>
@@ -738,7 +767,7 @@
   searchInput.addEventListener('input', () => { searchText = searchInput.value; renderEntries(); });
   document.getElementById('refresh-btn').addEventListener('click', () => loadMemory(contactSelect.value));
 
-  [['tab-long', 'long'], ['tab-session', 'session'], ['tab-reminder', 'reminder']].forEach(([id, tab]) => {
+  [['tab-long', 'long'], ['tab-session', 'session'], ['tab-archive', 'archive'], ['tab-reminder', 'reminder']].forEach(([id, tab]) => {
     document.getElementById(id).addEventListener('click', () => {
       activeTab = tab;
       document.querySelectorAll('.segmented button').forEach(btn => btn.classList.remove('active'));

@@ -1141,6 +1141,14 @@ def get_wa_agent_db():
     return conn
 
 
+def wa_table_exists(conn, table_name):
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return bool(row)
+
+
 def susu_clean_text(value):
     return re.sub(r"\s+", " ", str(value or "").strip())
 
@@ -1193,6 +1201,7 @@ def current_session_bucket(observed_at, now_utc=None):
 def fetch_susu_contacts(conn):
     contacts = {}
     order = []
+    archive_enabled = wa_table_exists(conn, "wa_memory_archive")
     for row in conn.execute(
         """
         SELECT wa_id, profile_name, updated_at
@@ -1208,7 +1217,10 @@ def fetch_susu_contacts(conn):
         }
         order.append(wa_id)
 
-    for table_name in ("wa_memories", "wa_session_memories", "wa_reminders"):
+    table_names = ["wa_memories", "wa_session_memories", "wa_reminders"]
+    if archive_enabled:
+        table_names.append("wa_memory_archive")
+    for table_name in table_names:
         rows = conn.execute(f"SELECT DISTINCT wa_id FROM {table_name} ORDER BY wa_id ASC").fetchall()
         for row in rows:
             wa_id = row["wa_id"]
@@ -1222,6 +1234,14 @@ def fetch_susu_contacts(conn):
         if wa_id in seen:
             continue
         seen.add(wa_id)
+        archive_count = 0
+        if archive_enabled:
+            archive_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS total FROM wa_memory_archive WHERE wa_id = ?",
+                    (wa_id,),
+                ).fetchone()["total"]
+            )
         counts = conn.execute(
             """
             SELECT
@@ -1238,6 +1258,7 @@ def fetch_susu_contacts(conn):
                 "display_name": item["profile_name"] or wa_id,
                 "memory_count": int(counts["memory_count"]),
                 "session_count": int(counts["session_count"]),
+                "archive_count": archive_count,
                 "reminder_count": int(counts["reminder_count"]),
                 "pending_reminder_count": int(counts["pending_reminder_count"]),
             }
@@ -1247,7 +1268,7 @@ def fetch_susu_contacts(conn):
     ranked.sort(
         key=lambda item: (
             item["wa_id"] != "85259576670",
-            -(item["memory_count"] + item["session_count"] + item["reminder_count"]),
+            -(item["memory_count"] + item["session_count"] + item["archive_count"] + item["reminder_count"]),
             item["wa_id"],
         )
     )
@@ -1257,6 +1278,7 @@ def fetch_susu_contacts(conn):
 def fetch_susu_memory(selected_wa_id=""):
     conn = get_wa_agent_db()
     try:
+        archive_enabled = wa_table_exists(conn, "wa_memory_archive")
         contacts = fetch_susu_contacts(conn)
         wa_ids = {item["wa_id"] for item in contacts}
         if selected_wa_id not in wa_ids:
@@ -1269,6 +1291,7 @@ def fetch_susu_memory(selected_wa_id=""):
 
         memories = []
         session_memories = []
+        archived_memories = []
         reminders = []
         if selected_wa_id:
             memories = [
@@ -1320,6 +1343,29 @@ def fetch_susu_memory(selected_wa_id=""):
                         "is_expired": bool(expires_at and expires_at <= now_utc),
                     }
                 )
+            if archive_enabled:
+                archived_memories = [
+                    {
+                        "id": row["id"],
+                        "wa_id": row["wa_id"],
+                        "content": row["content"] or "",
+                        "memory_key": row["memory_key"] or "",
+                        "source_bucket": row["source_bucket"] or "within_7d",
+                        "source_bucket_label": SESSION_BUCKET_LABELS.get(row["source_bucket"] or "within_7d", row["source_bucket"] or "within_7d"),
+                        "observed_at": row["observed_at"] or "",
+                        "updated_at": row["updated_at"] or "",
+                        "archived_at": row["archived_at"] or "",
+                    }
+                    for row in conn.execute(
+                        """
+                        SELECT id, wa_id, content, memory_key, source_bucket, observed_at, updated_at, archived_at
+                        FROM wa_memory_archive
+                        WHERE wa_id = ?
+                        ORDER BY observed_at DESC, archived_at DESC, id DESC
+                        """,
+                        (selected_wa_id,),
+                    ).fetchall()
+                ]
             reminders = [
                 {
                     "id": row["id"],
@@ -1348,6 +1394,7 @@ def fetch_susu_memory(selected_wa_id=""):
             "contacts": contacts,
             "long_term_memories": memories,
             "session_memories": session_memories,
+            "archived_memories": archived_memories,
             "reminders": reminders,
             "stats": {
                 "long_term_count": len(memories),
@@ -1356,6 +1403,7 @@ def fetch_susu_memory(selected_wa_id=""):
                 "recent_24h_count": sum(1 for item in session_memories if item["bucket"] == "within_24h" and not item["is_expired"]),
                 "recent_3d_count": sum(1 for item in session_memories if item["bucket"] == "within_3d" and not item["is_expired"]),
                 "recent_7d_count": sum(1 for item in session_memories if item["bucket"] == "within_7d" and not item["is_expired"]),
+                "archive_count": len(archived_memories),
                 "reminder_count": len(reminders),
                 "pending_reminder_count": sum(1 for item in reminders if not item["fired"]),
             },
@@ -1487,6 +1535,7 @@ def delete_susu_memory(entry_id, item_type="memory"):
     table_map = {
         "memory": "wa_memories",
         "session": "wa_session_memories",
+        "archive": "wa_memory_archive",
         "reminder": "wa_reminders",
     }
     table_name = table_map.get((item_type or "").strip(), "")

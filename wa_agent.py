@@ -169,6 +169,22 @@ STABLE_MEMORY_HINTS = (
 TIME_SCHEDULE_RE = re.compile(
     r"(?:(?:[01]?\d|2[0-3])[:：][0-5]\d|(?:[一二兩三四五六七八九十百零\d]{1,3})點(?:半|[一二三四五六七八九十\d]{1,2}分?)?)"
 )
+ARCHIVE_LOOKUP_TIME_MARKERS = (
+    "之前", "以前", "前排", "早排", "上星期", "上周", "上禮拜", "上礼拜",
+    "上個星期", "上个星期", "上個禮拜", "上个礼拜", "上個月", "上个月", "上月",
+    "早幾日", "早几日", "嗰陣", "那陣", "嗰次", "那次",
+)
+MEMORY_RECALL_MARKERS = (
+    "記唔記得", "仲記唔記得", "記得唔記得", "我之前", "我以前",
+    "我上星期", "我上周", "我上個月", "我上个月", "我前排",
+    "咩", "乜", "什麼", "什么", "邊度", "边度", "幾時", "几时", "幾點", "几点", "？", "?",
+)
+ARCHIVE_SEARCH_MARKERS = (
+    "食", "飲", "玩", "返", "翻", "去", "到", "忙", "病", "唔舒服", "瞓", "訓",
+    "上堂", "上課", "有課", "開會", "开会", "報告", "报告", "功課", "作業",
+    "影", "拍", "睇", "買", "server", "claude", "chatgpt", "攝影", "相",
+)
+ARCHIVE_CJK_STOP_CHARS = set("我你妳佢他她的咗左咩乜呀啊啦喇呢嗎吗吧有係系去到同埋又都就會想要過返翻")
 
 
 def utc_now():
@@ -333,6 +349,20 @@ def get_db():
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS wa_memory_archive (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wa_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            memory_key TEXT NOT NULL DEFAULT '',
+            source_bucket TEXT NOT NULL DEFAULT 'within_7d',
+            observed_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            archived_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS wa_proactive_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             wa_id TEXT NOT NULL,
@@ -409,10 +439,29 @@ def get_db():
     )
     conn.execute(
         """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_wa_memory_archive_unique
+        ON wa_memory_archive (wa_id, memory_key, observed_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_wa_memory_archive_lookup
+        ON wa_memory_archive (wa_id, archived_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_wa_memory_archive_observed
+        ON wa_memory_archive (wa_id, observed_at DESC)
+        """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_wa_proactive_events_lookup
         ON wa_proactive_events (wa_id, outcome, created_at DESC)
         """
     )
+    archive_expired_session_memories(conn)
     conn.commit()
     return conn
 
@@ -754,6 +803,166 @@ def normalize_recent_memory_rows(conn):
                 """,
                 (bucket, observed_text, expires_text, scoped_key, row["id"]),
             )
+
+
+def archive_expired_session_memories(conn, now=None):
+    now_utc = (now or hk_now()).astimezone(timezone.utc)
+    rows = conn.execute(
+        """
+        SELECT id, wa_id, content, memory_key, bucket, observed_at, updated_at, expires_at
+        FROM wa_session_memories
+        WHERE expires_at != '' AND expires_at <= ?
+        ORDER BY observed_at ASC, id ASC
+        """,
+        (now_utc.isoformat(),),
+    ).fetchall()
+    for row in rows:
+        content = clean_text(row["content"])
+        archive_key = normalize_key(content)
+        if not content or not archive_key:
+            conn.execute("DELETE FROM wa_session_memories WHERE id = ?", (row["id"],))
+            continue
+        observed = parse_iso_dt(row["observed_at"] or row["updated_at"]) or now_utc
+        observed_text = observed.astimezone(timezone.utc).isoformat()
+        updated_text = clean_text(row["updated_at"]) or observed_text
+        conn.execute(
+            """
+            INSERT INTO wa_memory_archive (
+                wa_id, content, memory_key, source_bucket, observed_at, updated_at, archived_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wa_id, memory_key, observed_at) DO UPDATE SET
+                content = excluded.content,
+                source_bucket = excluded.source_bucket,
+                updated_at = excluded.updated_at,
+                archived_at = excluded.archived_at
+            """,
+            (
+                row["wa_id"],
+                content,
+                archive_key,
+                normalize_recent_bucket(row["bucket"]),
+                observed_text,
+                updated_text,
+                now_utc.isoformat(),
+            ),
+        )
+        conn.execute("DELETE FROM wa_session_memories WHERE id = ?", (row["id"],))
+
+
+def should_lookup_archive(text):
+    value = clean_text(text)
+    if not value:
+        return False
+    if not any(marker in value for marker in ARCHIVE_LOOKUP_TIME_MARKERS):
+        return False
+    return any(marker in value for marker in MEMORY_RECALL_MARKERS + ARCHIVE_SEARCH_MARKERS)
+
+
+def archive_query_keywords(text):
+    value = clean_text(text).lower()
+    if not value:
+        return []
+
+    tokens = []
+    seen = set()
+
+    def push(token):
+        token = clean_text(token).lower()
+        if not token:
+            return
+        if token in seen:
+            return
+        seen.add(token)
+        tokens.append(token)
+
+    for marker in ARCHIVE_SEARCH_MARKERS:
+        if marker in value:
+            push(marker)
+
+    sanitized = value
+    for marker in ARCHIVE_LOOKUP_TIME_MARKERS + MEMORY_RECALL_MARKERS:
+        sanitized = sanitized.replace(marker.lower(), " ")
+
+    for token in re.findall(r"[a-z0-9_]{2,}", sanitized):
+        push(token)
+
+    for segment in re.findall(r"[\u4e00-\u9fff]{2,}", sanitized):
+        compact = "".join(ch for ch in segment if ch not in ARCHIVE_CJK_STOP_CHARS)
+        if not compact:
+            continue
+        if len(compact) == 1:
+            push(compact)
+            continue
+        upper = min(4, len(compact))
+        for size in range(upper, 1, -1):
+            for start in range(0, len(compact) - size + 1):
+                push(compact[start : start + size])
+                if len(tokens) >= 24:
+                    return tokens
+
+    return tokens
+
+
+def load_archived_memory_rows(conn, wa_id, limit=4, query_text=""):
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT content, source_bucket, observed_at, updated_at, archived_at
+            FROM wa_memory_archive
+            WHERE wa_id = ?
+            ORDER BY observed_at DESC, archived_at DESC, id DESC
+            LIMIT 120
+            """,
+            (wa_id,),
+        ).fetchall()
+    ]
+    if not rows:
+        return []
+
+    keywords = archive_query_keywords(query_text)
+    if not keywords:
+        return rows[:limit]
+
+    scored = []
+    for row in rows:
+        haystack = clean_text(row.get("content", "")).lower()
+        if not haystack:
+            continue
+        score = 0
+        for token in keywords:
+            if token in haystack:
+                score += max(len(token), 1)
+        if score <= 0:
+            continue
+        observed = parse_iso_dt(row.get("observed_at") or row.get("updated_at"))
+        scored.append((score, observed or datetime.min.replace(tzinfo=timezone.utc), row))
+
+    if not scored:
+        return rows[:limit]
+
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in scored[:limit]]
+
+
+def format_archived_memory_lines(rows, limit=4):
+    formatted = []
+    seen = set()
+    for row in rows[:limit]:
+        content = clean_text(row.get("content", ""))
+        if not content:
+            continue
+        key = normalize_key(content)
+        if key in seen:
+            continue
+        seen.add(key)
+        stamp = format_memory_timestamp(row.get("observed_at") or row.get("updated_at", ""))
+        if stamp:
+            formatted.append(f"- [過往 | {stamp}] {content}")
+        else:
+            formatted.append(f"- [過往] {content}")
+    return formatted
 
 
 def get_last_message_time(conn, wa_id, direction=None):
@@ -2257,6 +2466,7 @@ def reminder_loop():
 
 
 def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
+    lookup_archive = should_lookup_archive(incoming_text)
     history_lines = []
     quotable = []  # [(message_id, preview)]
     for item in load_recent_messages(conn, wa_id):
@@ -2284,12 +2494,25 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
     within_24h_memories = format_session_memory_lines(conn, wa_id, "within_24h", limit=6)
     within_3d_memories = format_session_memory_lines(conn, wa_id, "within_3d", limit=6)
     within_7d_memories = format_session_memory_lines(conn, wa_id, "within_7d", limit=6)
+    archived_memories = []
+    if lookup_archive:
+        archived_memories = format_archived_memory_lines(
+            load_archived_memory_rows(conn, wa_id, limit=4, query_text=incoming_text),
+            limit=4,
+        )
     history_text = "\n".join(history_lines[-12:]) if history_lines else "（暂时未有最近聊天）"
     habit_text = PRIMARY_USER_MEMORY
     memory_text = "\n".join(dynamic_memories) if dynamic_memories else "（暂时未有补充长期记忆）"
     within_24h_text = "\n".join(within_24h_memories) if within_24h_memories else "（暂时未有 24 小时内记忆）"
     within_3d_text = "\n".join(within_3d_memories) if within_3d_memories else "（暂时未有三天内记忆）"
     within_7d_text = "\n".join(within_7d_memories) if within_7d_memories else "（暂时未有一周内记忆）"
+    archived_text = "\n".join(archived_memories) if archived_memories else "（暂时未命中过往归档记忆）"
+    archive_section = ""
+    if lookup_archive:
+        archive_section = f"""
+
+过往归档记忆（7 天前，只在对方追问旧事时优先参考）：
+{archived_text}"""
     image_stats_text = load_image_stats_summary(conn, wa_id)
     prompt_user_text = clean_text(incoming_text) or "（对方这次只发了图片，没有额外文字）"
 
@@ -2337,6 +2560,7 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
 
 一週內記憶：
 {within_7d_text}
+{archive_section}
 
 最近聊天：
 {history_text}
