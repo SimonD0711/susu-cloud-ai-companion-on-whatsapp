@@ -1,0 +1,14 @@
+[Unit]
+Description=WhatsApp Agent Webhook Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/html
+EnvironmentFile=/etc/wa-agent.env
+ExecStart=/usr/bin/python3 /var/www/html/wa_agent.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

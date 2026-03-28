@@ -13,3 +13,5 @@ remote-default.conf
 remote-gemini-proxy.conf
 remote-google-proxy.conf
 remote-nginx.conf
+__pycache__/
+wa_agent.db
