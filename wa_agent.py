@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import difflib
+import html
 import subprocess
 import shlex
 import json
@@ -8,15 +9,19 @@ import os
 import random
 import re
 import sqlite3
+import sys
 import threading
+import traceback
 import textwrap
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
+import xml.etree.ElementTree as ET
 
 from env_utils import load_dotenv
 
@@ -57,7 +62,10 @@ VERIFY_TOKEN = os.environ.get("WA_VERIFY_TOKEN", "")
 ACCESS_TOKEN = os.environ.get("WA_ACCESS_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("WA_PHONE_NUMBER_ID", "")
 GRAPH_VERSION = os.environ.get("WA_GRAPH_VERSION", "v22.0")
-INBOUND_GRACE_SECONDS = float(os.environ.get("WA_INBOUND_GRACE_SECONDS", "7"))
+TYPING_INDICATOR_DELAY_SECONDS = float(os.environ.get("WA_TYPING_INDICATOR_DELAY_SECONDS", "0.5"))
+TYPING_INDICATOR_REFRESH_SECONDS = float(os.environ.get("WA_TYPING_INDICATOR_REFRESH_SECONDS", "4.0"))
+REPLY_JOB_POLL_SECONDS = float(os.environ.get("WA_REPLY_JOB_POLL_SECONDS", "0.05"))
+REPLY_JOB_TERMINATE_GRACE_SECONDS = float(os.environ.get("WA_REPLY_JOB_TERMINATE_GRACE_SECONDS", "0.25"))
 PROACTIVE_ENABLED = os.environ.get("WA_PROACTIVE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 PROACTIVE_SCAN_SECONDS = int(os.environ.get("WA_PROACTIVE_SCAN_SECONDS", "300"))
 PROACTIVE_MIN_SILENCE_MINUTES = int(os.environ.get("WA_PROACTIVE_MIN_SILENCE_MINUTES", "45"))
@@ -67,8 +75,9 @@ PROACTIVE_CONVERSATION_WINDOW_HOURS = int(os.environ.get("WA_PROACTIVE_CONVERSAT
 PROACTIVE_MAX_PER_SERVICE_DAY = int(os.environ.get("WA_PROACTIVE_MAX_PER_SERVICE_DAY", "2"))
 PROACTIVE_MIN_INBOUND_MESSAGES = int(os.environ.get("WA_PROACTIVE_MIN_INBOUND_MESSAGES", "8"))
 
+SUSU_LOCKED_RELAY_MODEL = "claude-opus-4-6"
 RELAY_API_KEY = os.environ.get("WA_RELAY_API_KEY", "")
-RELAY_MODEL = os.environ.get("WA_RELAY_MODEL", "claude-opus-4-6")
+RELAY_MODEL = os.environ.get("WA_RELAY_MODEL", SUSU_LOCKED_RELAY_MODEL)
 RELAY_FALLBACK_MODEL = os.environ.get("WA_RELAY_FALLBACK_MODEL", "claude-sonnet-4-6")
 RELAY_BASE_URL = os.environ.get("WA_RELAY_BASE_URL", "https://apiapipp.com/v1")
 
@@ -94,8 +103,168 @@ WA_PORT = int(os.environ.get("WA_PORT", "9100"))
 MAX_IMAGE_ATTACHMENTS = int(os.environ.get("WA_MAX_IMAGE_ATTACHMENTS", "3"))
 MAX_IMAGE_BYTES = int(os.environ.get("WA_MAX_IMAGE_BYTES", str(5 * 1024 * 1024)))
 
-HK_TZ = ZoneInfo("Asia/Hong_Kong") if ZoneInfo else timezone(timedelta(hours=8))
+if ZoneInfo:
+    try:
+        HK_TZ = ZoneInfo("Asia/Hong_Kong")
+    except Exception:
+        HK_TZ = timezone(timedelta(hours=8))
+else:
+    HK_TZ = timezone(timedelta(hours=8))
 PUNCTUATION = "。！？!?~～…"
+HKO_OPEN_DATA_BASE_URL = "https://data.weather.gov.hk/weatherAPI/opendata/weather.php"
+LIVE_LOOKUP_CACHE_SECONDS = 180
+LIVE_SEARCH_ROUTER_CACHE_SECONDS = 120
+_live_lookup_cache = {}
+_live_lookup_cache_lock = threading.Lock()
+_reply_worker_states = {}
+_reply_worker_states_lock = threading.Lock()
+
+WEATHER_QUERY_KEYWORDS = (
+    "天氣", "天气", "weather", "氣溫", "气温", "幾度", "几度", "落雨", "落唔落雨",
+    "會唔會落雨", "会不会下雨", "下雨", "驟雨", "骤雨", "雷暴", "有冇雨", "有沒有雨",
+    "熱唔熱", "热不热", "凍唔凍", "冷唔冷", "濕度", "湿度",
+)
+TODAY_WEATHER_HINTS = ("今日", "今天", "而家", "依家", "宜家", "現在", "现在", "今晚", "今朝", "今日份")
+TOMORROW_WEATHER_HINTS = ("聽日", "听日", "明日", "明天", "tomorrow")
+DAY_AFTER_TOMORROW_WEATHER_HINTS = ("後日", "后日", "大後日", "大后日")
+HK_DEFAULT_LOCATION_HINTS = ("香港", "hk", "hong kong")
+EXPLICIT_SEARCH_HINTS = (
+    "幫我查", "幫我搵", "查下", "查吓", "查一查", "搜尋", "搜索",
+    "search", "lookup", "google", "上網", "網上", "online search",
+)
+NEWS_QUERY_KEYWORDS = (
+    "新聞", "新闻", "大新聞", "大新闻", "news", "頭條", "头条", "headline",
+    "最新消息", "最新新聞", "最新新闻", "即時", "即时", "突發", "突发",
+    "有咩新聞", "有咩新闻", "有乜新聞", "有乜新闻", "發生咩事", "发生咩事",
+)
+LIVE_TIME_HINTS = (
+    "最新", "而家", "依家", "宜家", "現在", "现在", "今日", "今天", "即時", "current", "today",
+)
+FACT_QUERY_HINTS = (
+    "係咪", "是嗎", "係唔係", "是不是", "有冇", "有沒有", "會唔會", "会不会",
+    "幾多", "多少", "幾時", "何時", "點樣", "如何", "邊個", "哪个", "誰", "谁", "？", "?",
+)
+MUSIC_QUERY_KEYWORDS = (
+    "新歌", "最新歌", "新出的歌", "最近嘅歌", "最近的歌", "新專輯", "新专辑",
+    "最新專輯", "最新专辑", "新單曲", "新单曲",
+)
+RANKING_QUERY_KEYWORDS = (
+    "排行榜", "排行", "排名", "榜單", "榜单", "榜", "top 10", "top10", "前十", "前 10", "十首", "週榜", "周榜", "月榜",
+)
+MUSIC_RECOMMENDATION_HINTS = (
+    "邊首", "边首", "哪首", "咩歌", "乜歌", "好聽", "好听", "推薦", "推荐",
+)
+LIVE_SEARCH_FOLLOWUP_HINTS = (
+    "快啲幫我查", "快点帮我查", "再幫我查", "再帮我查", "繼續查", "继续查", "查啦", "快啲查",
+    "快点查", "幫我查啦", "帮我查啦", "快啲幫我睇", "快点帮我看", "再睇下", "再看下",
+)
+COUNT_QUERY_HINTS = ("幾首", "几首", "幾多首", "几多首", "多少首")
+SEARCH_ENTITY_ALIASES = {
+    "周董": "周杰倫",
+    "杰倫": "周杰倫",
+    "杰伦": "周杰倫",
+    "周董哥": "周杰倫",
+    "jay chou": "周杰倫",
+}
+GENERIC_MUSIC_TERMS = (
+    "歌", "歌曲", "新歌", "音樂", "音乐", "單曲", "单曲", "專輯", "专辑", "mv", "album", "single",
+)
+HK_NEWS_PREFERRED_DOMAINS = (
+    "rthk.hk",
+    "news.gov.hk",
+    "hk01.com",
+    "mingpao.com",
+    "hket.com",
+    "stheadline.com",
+    "am730.com.hk",
+    "on.cc",
+    "scmp.com",
+)
+GLOBAL_NEWS_PREFERRED_DOMAINS = (
+    "reuters.com",
+    "apnews.com",
+    "bbc.com",
+    "cnn.com",
+    "nytimes.com",
+    "theguardian.com",
+)
+MUSIC_PREFERRED_DOMAINS = (
+    "youtube.com",
+    "music.youtube.com",
+    "spotify.com",
+    "open.spotify.com",
+    "music.apple.com",
+    "kkbox.com",
+    "genius.com",
+    "wikipedia.org",
+)
+CHART_PREFERRED_DOMAINS = (
+    "kma.kkbox.com",
+    "kkbox.com",
+    "billboard.com",
+    "music.apple.com",
+    "spotify.com",
+)
+LIVE_SEARCH_SUMMARIZER_PROMPT = textwrap.dedent(
+    """
+    你係一個即時搜尋結果整理器。
+    你只可以根據用戶提供嘅搜尋結果回答，唔好加入搜尋結果冇寫到嘅內容。
+    如果資料不足以直接下判斷，就坦白講「暫時見到嘅結果未夠準」，唔好亂估。
+    回覆要保持蘇蘇平時嘅語氣：自然、黏少少、似真人 WhatsApp 對話，但清楚準確優先。
+    如果內容同「今日 / 而家 / 最新」有關，盡量講清楚具體日期或者時間。
+    如果用戶問主觀偏好，例如「邊首好聽」，就先講清楚搜尋結果入面可驗證嘅客觀部分，例如最新發行、最近最多人提及；
+    如果要表達偏好，必須講明只係按搜尋結果熱度或者來源分佈去推斷，唔好扮成你知道真正答案。
+    只輸出要發畀對方嘅回覆本身。
+    """
+).strip()
+LIVE_SEARCH_ROUTER_PROMPT = textwrap.dedent(
+    """
+    你係一個超輕量即時搜尋路由器，只做三件事：
+    1. 判斷用戶問題係咪需要上網查最新/即時/會變動嘅外部資料
+    2. 如果要，揀 mode：weather、news、music、web、none
+    3. 產生短、乾淨、適合搜尋引擎嘅 query
+
+    規則：
+    - 只有當答案可能因時間而變，例如今日新聞、現時狀態、最新作品、即時事實，先 should_search=true
+    - 問天氣、氣溫、落雨、天文台預報時，mode 應該用 weather
+    - 純閒聊、純主觀陪伴、唔使外部資料都答到嘅內容，should_search=false
+    - 問「邊首好聽」但同「新歌 / 最新 / 最近作品」一齊出現時，應先查最新作品，mode=music
+    - 幫手做簡單別名歸一化，例如「周董」->「周杰倫」
+    - query 唔好保留口頭禪、語氣詞、客套語
+    - 只輸出 JSON object，格式固定：
+      {"should_search": true, "mode": "news", "query": "香港 最新新聞", "confidence": 0.96}
+
+    例子：
+    用戶：你知唔知今天香港有咩大新聞呀
+    {"should_search": true, "mode": "news", "query": "香港 最新新聞", "confidence": 0.98}
+
+    用戶：周董新歌哪首好聽呀
+    {"should_search": true, "mode": "music", "query": "周杰倫 最新 新歌", "confidence": 0.94}
+
+    用戶：今日香港天氣點樣
+    {"should_search": true, "mode": "weather", "query": "今日 香港 天氣", "confidence": 0.98}
+
+    用戶：你掛唔掛住我
+    {"should_search": false, "mode": "none", "query": "", "confidence": 0.98}
+    """
+).strip()
+LIVE_SEARCH_REVIEW_PROMPT = textwrap.dedent(
+    """
+    你係一個即時搜尋審稿器，任務係判斷「目前搜尋結果夠唔夠支持回答」。
+    你只可以根據用戶問題、搜尋 query 同搜尋結果做判斷，唔好自己補資料。
+
+    請只輸出 JSON object：
+    {"decision":"answer|refine|abstain","refined_query":"","reason":"一句短理由","confidence":0.0}
+
+    規則：
+    - answer：當前結果已經足夠直接回答，而且唔需要估。
+    - refine：問題應該查得到，但當前 query 太闊、太偏、太泛，建議改一條更準嘅 query 再查一次。
+    - abstain：結果仍然唔夠穩陣、互相矛盾、或者缺少關鍵證據，唔應該硬答。
+    - 排行榜、前十、幾多首、名單、比較呢類問題，如果冇完整可靠證據，唔好答死，應該 refine 或 abstain。
+    - refined_query 要保留人名、地點、品牌名、榜單名等關鍵主體。
+    - reason 要短，純描述問題，例如「結果太泛，未直接對應榜單」。
+    """
+).strip()
 
 SYSTEM_PERSONA = textwrap.dedent(
     """
@@ -184,26 +353,22 @@ STABLE_MEMORY_HINTS = (
 TIME_SCHEDULE_RE = re.compile(
     r"(?:(?:[01]?\d|2[0-3])[:：][0-5]\d|(?:[一二兩三四五六七八九十百零\d]{1,3})點(?:半|[一二三四五六七八九十\d]{1,2}分?)?)"
 )
-
-
 ARCHIVE_LOOKUP_TIME_MARKERS = (
     "之前", "以前", "前排", "早排", "上星期", "上周", "上禮拜", "上礼拜",
-    "上個星期", "上个星期", "上個月", "上个月", "上月", "前幾日", "前几日",
-    "嗰陣", "那陣", "嗰次", "那次",
+    "上個星期", "上个星期", "上個禮拜", "上个礼拜", "上個月", "上个月", "上月",
+    "早幾日", "早几日", "嗰陣", "那陣", "嗰次", "那次",
 )
 MEMORY_RECALL_MARKERS = (
-    "記唔記得", "记唔记得", "記得唔記得", "记得唔记得", "記得", "记得",
-    "我之前", "我以前", "我上星期", "我上周", "我上個月", "我上个月", "我前排",
-    "咩", "乜", "什么", "點", "点", "幾時", "几时", "幾點", "几点", "？", "?",
+    "記唔記得", "仲記唔記得", "記得唔記得", "我之前", "我以前",
+    "我上星期", "我上周", "我上個月", "我上个月", "我前排",
+    "咩", "乜", "什麼", "什么", "邊度", "边度", "幾時", "几时", "幾點", "几点", "？", "?",
 )
 ARCHIVE_SEARCH_MARKERS = (
-    "食", "飲", "饮", "玩", "去", "返", "睇", "講", "讲", "做", "交",
-    "上堂", "上課", "上课", "有課", "有课", "開會", "开会",
-    "報告", "报告", "功課", "功课", "作業", "作业",
-    "影", "相", "server", "claude", "chatgpt",
+    "食", "飲", "玩", "返", "翻", "去", "到", "忙", "病", "唔舒服", "瞓", "訓",
+    "上堂", "上課", "有課", "開會", "开会", "報告", "报告", "功課", "作業",
+    "影", "拍", "睇", "買", "server", "claude", "chatgpt", "攝影", "相",
 )
-ARCHIVE_CJK_STOP_CHARS = set("我你妳佢他她的咗左啦喇呀啊喎呢嗎吗吧有係系去到同埋又都就想要過返")
-
+ARCHIVE_CJK_STOP_CHARS = set("我你妳佢他她的咗左咩乜呀啊啦喇呢嗎吗吧有係系去到同埋又都就會想要過返翻")
 
 SUSU_SETTINGS_TABLE = "wa_susu_settings"
 RUNTIME_SETTINGS_CACHE_TTL_SECONDS = 5
@@ -212,9 +377,6 @@ RUNTIME_SETTINGS_CACHE = {"values": None, "expires_at": 0.0}
 SUSU_RUNTIME_SETTING_SPECS = {
     "system_persona": {"type": "multiline", "default": SYSTEM_PERSONA, "max_length": 12000},
     "primary_user_memory": {"type": "multiline", "default": PRIMARY_USER_MEMORY, "max_length": 12000},
-    "relay_model": {"type": "text", "default": RELAY_MODEL, "max_length": 120},
-    "relay_fallback_model": {"type": "text", "default": RELAY_FALLBACK_MODEL, "max_length": 120},
-    "gemini_model": {"type": "text", "default": GEMINI_MODEL, "max_length": 120},
     "proactive_enabled": {"type": "bool", "default": PROACTIVE_ENABLED},
     "proactive_scan_seconds": {"type": "int", "default": PROACTIVE_SCAN_SECONDS, "min": 60, "max": 3600},
     "proactive_min_silence_minutes": {"type": "int", "default": PROACTIVE_MIN_SILENCE_MINUTES, "min": 5, "max": 1440},
@@ -270,8 +432,6 @@ def coerce_runtime_setting_value(key, raw_value):
         return parse_runtime_int(raw_value, default, spec.get("min"), spec.get("max"))
     if setting_type == "multiline":
         text = normalize_runtime_multiline(raw_value, default)[: spec.get("max_length", 12000)]
-        if key == "primary_user_memory":
-            return build_core_profile_memory_text(text)[: spec.get("max_length", 12000)]
         return text or default
     text = normalize_runtime_text(raw_value, default)[: spec.get("max_length", 255)]
     return text or default
@@ -419,21 +579,1124 @@ def style_window_text(now=None):
 
 
 def get_relay_model_order(now=None):
-    now = now or hk_now()
+    return SUSU_LOCKED_RELAY_MODEL, ""
+
+
+def build_live_search_system_prompt():
     settings = get_runtime_settings()
-    relay_model = normalize_runtime_text(settings.get("relay_model"), RELAY_MODEL)
-    relay_fallback_model = normalize_runtime_text(settings.get("relay_fallback_model"), RELAY_FALLBACK_MODEL)
-    if is_night_mode(now):
-        primary = relay_fallback_model or relay_model
-        secondary = relay_model if relay_model != primary else ""
-    else:
-        primary = relay_model
-        secondary = relay_fallback_model if relay_fallback_model != primary else ""
-    return primary, secondary
+    persona = normalize_runtime_multiline(settings.get("system_persona"), SYSTEM_PERSONA)
+    return f"{persona}\n\n{LIVE_SEARCH_SUMMARIZER_PROMPT}".strip()
 
 
 def clean_text(value):
-    return re.sub(r"\s+", " ", (value or "").strip())
+    text = str(value or "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    return re.sub(r"\s+", " ", text.strip())
+
+
+def fetch_json_url(url, timeout=15, headers=None):
+    request = Request(
+        url,
+        headers=headers or {"User-Agent": "SusuCloud/1.0"},
+        method="GET",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        raw = response.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+
+def cached_live_json(cache_key, loader, ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS):
+    now_ts = time.time()
+    with _live_lookup_cache_lock:
+        cached = _live_lookup_cache.get(cache_key)
+        if cached and now_ts - cached["stored_at"] < ttl_seconds:
+            return cached["value"]
+    value = loader()
+    with _live_lookup_cache_lock:
+        _live_lookup_cache[cache_key] = {"stored_at": now_ts, "value": value}
+    return value
+
+
+def fetch_hko_weather_dataset(data_type, lang="tc"):
+    url = f"{HKO_OPEN_DATA_BASE_URL}?dataType={data_type}&lang={lang}"
+    return cached_live_json(
+        ("hko_weather", data_type, lang),
+        lambda: fetch_json_url(url, timeout=15),
+        ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+    )
+
+
+def format_hk_clock(iso_text):
+    parsed = parse_iso_dt(iso_text)
+    if not parsed:
+        return ""
+    return parsed.astimezone(HK_TZ).strftime("%H:%M")
+
+
+def contains_any_keyword(text, keywords):
+    lowered = clean_text(text).lower()
+    return any(keyword in text or keyword in lowered for keyword in keywords)
+
+
+def detect_weather_day_offset(text):
+    if contains_any_keyword(text, DAY_AFTER_TOMORROW_WEATHER_HINTS):
+        return 2
+    if contains_any_keyword(text, TOMORROW_WEATHER_HINTS):
+        return 1
+    return 0
+
+
+def is_weather_query(text):
+    value = clean_text(text)
+    if not value:
+        return False
+    return contains_any_keyword(value, WEATHER_QUERY_KEYWORDS)
+
+
+def normalize_weather_place(value):
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", clean_text(value)).lower()
+
+
+def choose_weather_station(rhrread, text):
+    stations = ((rhrread or {}).get("temperature") or {}).get("data") or []
+    if not stations:
+        return {}
+    normalized_text = normalize_weather_place(text)
+    matched = []
+    for row in stations:
+        place = clean_text(row.get("place"))
+        normalized_place = normalize_weather_place(place)
+        if normalized_place and normalized_place in normalized_text:
+            matched.append((len(normalized_place), row))
+    if matched:
+        matched.sort(key=lambda item: item[0], reverse=True)
+        return matched[0][1]
+    if contains_any_keyword(text, HK_DEFAULT_LOCATION_HINTS):
+        for row in stations:
+            if clean_text(row.get("place")) == "香港天文台":
+                return row
+    for preferred in ("香港天文台", "京士柏", "九龍城", "香港公園"):
+        for row in stations:
+            if clean_text(row.get("place")) == preferred:
+                return row
+    return stations[0]
+
+
+def extract_hko_humidity_value(rhrread):
+    rows = ((rhrread or {}).get("humidity") or {}).get("data") or []
+    for row in rows:
+        value = row.get("value")
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def collect_active_weather_warnings(rhrread, warnsum):
+    labels = []
+    warning_message = (rhrread or {}).get("warningMessage")
+    if isinstance(warning_message, str):
+        text = clean_text(warning_message)
+        if text:
+            labels.append(text)
+    elif isinstance(warning_message, list):
+        for item in warning_message:
+            text = clean_text(item)
+            if text:
+                labels.append(text)
+
+    if isinstance(warnsum, dict):
+        for code, payload in warnsum.items():
+            if isinstance(payload, dict):
+                name = clean_text(payload.get("name") or payload.get("warningStatementCode") or code)
+            else:
+                name = clean_text(code)
+            if name:
+                labels.append(name)
+
+    deduped = []
+    seen = set()
+    for label in labels:
+        key = normalize_key(label)
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(label)
+    return deduped
+
+
+def build_live_weather_reply(incoming_text):
+    if not is_weather_query(incoming_text):
+        return None
+
+    try:
+        rhrread = fetch_hko_weather_dataset("rhrread")
+        flw = fetch_hko_weather_dataset("flw")
+        fnd = fetch_hko_weather_dataset("fnd")
+        warnsum = fetch_hko_weather_dataset("warnsum")
+    except Exception:
+        return "我啱啱連唔到天文台資料，唔想亂講天氣，你隔一陣再問我一次好唔好？"
+
+    day_offset = detect_weather_day_offset(incoming_text)
+    warnings = collect_active_weather_warnings(rhrread, warnsum)
+
+    if day_offset <= 0:
+        update_time = format_hk_clock((rhrread or {}).get("updateTime") or (flw or {}).get("updateTime"))
+        station = choose_weather_station(rhrread, incoming_text)
+        station_place = clean_text(station.get("place")) or "香港"
+        temperature = station.get("value")
+        humidity = extract_hko_humidity_value(rhrread)
+        forecast_desc = clean_text((flw or {}).get("forecastDesc"))
+
+        pieces = ["我啱啱幫你睇咗天文台"]
+        current_bits = []
+        if temperature not in (None, ""):
+            current_bits.append(f"{station_place}而家大概 {temperature} 度")
+        if humidity not in (None, ""):
+            current_bits.append(f"濕度約 {humidity}%")
+        if current_bits:
+            pieces.append("，".join(current_bits))
+        if forecast_desc:
+            pieces.append(f"今日{forecast_desc}")
+        if warnings:
+            pieces.append(f"而家生效緊嘅警告有 {('、'.join(warnings[:2]))}")
+        elif forecast_desc and any(token in forecast_desc for token in ("雨", "驟雨", "雷暴")):
+            pieces.append("出門最好帶把遮會穩陣啲")
+        elif temperature not in (None, "") and float(temperature) >= 28:
+            pieces.append("日頭應該會幾熱，記得飲多啲水呀")
+        if update_time:
+            pieces.append(f"呢個係 {update_time} 更新")
+        return "。".join(piece.strip("。") for piece in pieces if piece).strip("。") + "。"
+
+    forecasts = (fnd or {}).get("weatherForecast") or []
+    index = min(max(day_offset - 1, 0), len(forecasts) - 1) if forecasts else -1
+    if index < 0:
+        return "我啱啱未攞到之後幾日嘅天氣預報，你遲啲再問我一次啦。"
+
+    item = forecasts[index]
+    update_time = format_hk_clock((fnd or {}).get("updateTime") or (flw or {}).get("updateTime"))
+    label = "聽日" if day_offset == 1 else ("後日" if day_offset == 2 else clean_text(item.get("week")) or "之後")
+    min_temp = ((item.get("forecastMintemp") or {}).get("value"))
+    max_temp = ((item.get("forecastMaxtemp") or {}).get("value"))
+    min_rh = ((item.get("forecastMinrh") or {}).get("value"))
+    max_rh = ((item.get("forecastMaxrh") or {}).get("value"))
+    weather_text = clean_text(item.get("forecastWeather"))
+    wind_text = clean_text(item.get("forecastWind"))
+
+    range_bits = []
+    if min_temp not in (None, "") and max_temp not in (None, ""):
+        range_bits.append(f"{min_temp} 至 {max_temp} 度")
+    if min_rh not in (None, "") and max_rh not in (None, ""):
+        range_bits.append(f"濕度約 {min_rh}% 至 {max_rh}%")
+    intro = f"我幫你睇咗天文台，{label}"
+    if range_bits:
+        intro += "大概 " + "，".join(range_bits)
+    pieces = [intro]
+    if weather_text:
+        pieces.append(weather_text)
+    if wind_text:
+        pieces.append(wind_text)
+    if weather_text and any(token in weather_text for token in ("雨", "驟雨", "雷暴")):
+        pieces.append("如果要出街，帶遮會穩陣啲呀")
+    elif max_temp not in (None, "") and float(max_temp) >= 28:
+        pieces.append("日頭應該都幾熱")
+    if update_time:
+        pieces.append(f"預報資料係 {update_time} 更新")
+    return "。".join(piece.strip("。") for piece in pieces if piece).strip("。") + "。"
+
+
+def is_news_query(text):
+    value = clean_text(text)
+    return contains_any_keyword(value, NEWS_QUERY_KEYWORDS)
+
+
+def normalize_search_entities(text):
+    value = clean_text(text)
+    placeholders = {}
+    for index, (alias, canonical) in enumerate(
+        sorted(SEARCH_ENTITY_ALIASES.items(), key=lambda item: len(item[0]), reverse=True)
+    ):
+        placeholder = f"__SEARCH_ALIAS_{index}__"
+        pattern = re.escape(alias)
+        if canonical.endswith(alias) and len(canonical) > len(alias):
+            prefix = re.escape(canonical[:-len(alias)])
+            pattern = rf"(?<!{prefix}){pattern}"
+        updated = re.sub(pattern, placeholder, value, flags=re.I)
+        if updated != value:
+            value = updated
+            placeholders[placeholder] = canonical
+    for placeholder, canonical in placeholders.items():
+        value = value.replace(placeholder, canonical)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def dedupe_search_terms(text):
+    parts = []
+    seen = set()
+    for part in clean_text(text).split():
+        key = part.lower()
+        if key and key not in seen:
+            seen.add(key)
+            parts.append(part)
+    return " ".join(parts)
+
+
+def strip_search_tokens(text, tokens):
+    value = clean_text(text)
+    for token in sorted(set(tokens), key=len, reverse=True):
+        value = value.replace(token, " ")
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def is_music_query(text):
+    value = normalize_search_entities(text)
+    if not value:
+        return False
+    if contains_any_keyword(value, MUSIC_QUERY_KEYWORDS):
+        return True
+    has_music_term = contains_any_keyword(value, GENERIC_MUSIC_TERMS)
+    if not has_music_term:
+        return False
+    if is_ranking_query(value):
+        return True
+    if contains_any_keyword(value, MUSIC_RECOMMENDATION_HINTS):
+        return True
+    return contains_any_keyword(value, LIVE_TIME_HINTS)
+
+
+def is_ranking_query(text):
+    value = normalize_search_entities(text)
+    if not value:
+        return False
+    return contains_any_keyword(value, RANKING_QUERY_KEYWORDS)
+
+
+def detect_live_search_mode(text):
+    value = clean_text(text)
+    if is_weather_query(value):
+        return "weather"
+    if is_news_query(value):
+        return "news"
+    if is_music_query(value):
+        return "music"
+    return "web"
+
+
+def should_consider_live_search_router(text):
+    value = clean_text(text)
+    if not value or len(value) > 160:
+        return False
+    if is_weather_query(value):
+        return True
+    if contains_any_keyword(value, EXPLICIT_SEARCH_HINTS):
+        return True
+    if contains_any_keyword(value, LIVE_TIME_HINTS) or contains_any_keyword(value, NEWS_QUERY_KEYWORDS) or contains_any_keyword(value, MUSIC_QUERY_KEYWORDS) or contains_any_keyword(value, RANKING_QUERY_KEYWORDS):
+        return True
+    lowered = value.lower()
+    if any(alias.lower() in lowered for alias in SEARCH_ENTITY_ALIASES):
+        return True
+    return contains_any_keyword(value, ("係唔係", "是不是", "仲係唔係", "仲係", "仍然", "还在", "還在", "最新", "現時", "现时"))
+
+
+def looks_like_live_search_followup(text):
+    value = clean_text(text)
+    if not value or len(value) > 80:
+        return False
+    if not contains_any_keyword(value, LIVE_SEARCH_FOLLOWUP_HINTS):
+        return False
+    if is_weather_query(value) or is_news_query(value) or is_music_query(value):
+        return False
+    lowered = value.lower()
+    return not any(alias.lower() in lowered for alias in SEARCH_ENTITY_ALIASES)
+
+
+def has_live_search_topic_clues(text):
+    value = clean_text(text)
+    if not value:
+        return False
+    if is_weather_query(value) or is_news_query(value) or is_music_query(value) or is_ranking_query(value):
+        return True
+    if contains_any_keyword(value, EXPLICIT_SEARCH_HINTS):
+        return True
+    lowered = value.lower()
+    return any(alias.lower() in lowered for alias in SEARCH_ENTITY_ALIASES)
+
+
+def expand_live_search_followup_text(conn, wa_id, incoming_text, history_limit=8):
+    value = clean_text(incoming_text)
+    if not conn or not wa_id or not looks_like_live_search_followup(value):
+        return value
+
+    rows = conn.execute(
+        """
+        SELECT body
+        FROM wa_messages
+        WHERE wa_id = ?
+          AND direction = 'inbound'
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (wa_id, max(2, int(history_limit))),
+    ).fetchall()
+    for row in rows:
+        candidate = clean_text(row["body"])
+        if not candidate or candidate == value:
+            continue
+        if looks_like_live_search_followup(candidate):
+            continue
+        if has_live_search_topic_clues(candidate):
+            return f"{candidate}\n{value}"
+    return value
+
+
+def extract_search_query(text, mode="web"):
+    value = normalize_search_entities(text)
+    patterns = [
+        r"^(?:蘇蘇|苏苏|bb|老婆|寶寶|宝宝)?\s*(?:你知唔知|知唔知|你知不知道|知不知道|想問下|想問|想知|想知道)?\s*",
+        r"^(?:蘇蘇|苏苏|bb|老婆|寶寶|宝宝)?\s*(?:可唔可以|可不可以|可以|你可唔可以|你可以)?\s*(?:幫我|同我)?\s*(?:上網)?\s*(?:查下|查吓|查一查|搵下|搵吓|搜尋|搜索|search|lookup|google)\s*",
+        r"^(?:蘇蘇|苏苏|bb|老婆|寶寶|宝宝)?\s*(?:你)?(?:幫我|帮我|同我)?\s*(?:睇下|睇睇|看一下|看一看|看看|看下)\s*",
+    ]
+    query = value
+    for pattern in patterns:
+        query = re.sub(pattern, "", query, flags=re.I)
+    if mode in {"web", "music"}:
+        for token in (
+            "而家", "依家", "宜家", "現在", "现在", "今日", "今天", "最新", "即時", "当前", "目前",
+            "係唔係", "是不是", "是嗎", "係咪", "會唔會", "会不会", "有冇", "有沒有", "幾多", "多少",
+            "點樣", "如何", "邊個", "哪个", "誰", "谁", "呢家", "而且", "可唔可以",
+        ):
+            query = query.replace(token, " ")
+    query = re.sub(r"[?？!！]+", " ", query)
+    query = re.sub(r"\s+", " ", query)
+    query = query.strip("，。！？!? ")
+    return dedupe_search_terms(query or value)
+
+
+def build_news_search_query(query):
+    value = strip_search_tokens(normalize_search_entities(query), (
+        "今日", "今天", "而家", "依家", "宜家", "最新", "即時", "即时", "頭條", "头条", "headline",
+        "news", "新聞", "新闻", "大新聞", "大新闻", "有咩", "有乜", "發生咩事", "发生咩事", "知唔知",
+        "呀", "啊", "呢", "喇", "嘛",
+    ))
+    value = re.sub(r"[?？!！,，。]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    if not value:
+        value = "香港" if contains_any_keyword(query, HK_DEFAULT_LOCATION_HINTS) else clean_text(query)
+    if contains_any_keyword(query, HK_DEFAULT_LOCATION_HINTS) and not contains_any_keyword(value, HK_DEFAULT_LOCATION_HINTS):
+        value = f"香港 {value}"
+    if not contains_any_keyword(value, ("新聞", "新闻", "news", "headline")):
+        value = f"{value} 最新新聞".strip()
+    return dedupe_search_terms(f"{value} when:1d")
+
+
+def build_music_search_query(query):
+    normalized = normalize_search_entities(query)
+    wants_album = contains_any_keyword(normalized, ("專輯", "专辑", "album"))
+    subject = strip_search_tokens(normalized, (
+        "邊首", "边首", "哪首", "好聽", "好听", "推薦", "推荐", "覺得", "觉得", "你覺得", "你觉得",
+        "知唔知", "想問", "想知", "而家", "依家", "宜家", "今日", "今天", "呀", "啊", "呢", "喇", "嘛",
+        "都係", "都是", "都系", "有咩", "有乜", "幫我", "帮我", "你幫我", "你帮我", "睇下", "睇睇", "看一下", "看一看", "看看", "看下",
+    ) + MUSIC_QUERY_KEYWORDS + GENERIC_MUSIC_TERMS + RANKING_QUERY_KEYWORDS)
+    subject = re.sub(r"[?？!！,，。]+", " ", subject)
+    subject = re.sub(r"(?:有)?[幾几]\s*首", " ", subject)
+    subject = re.sub(r"(?:喺|在)\s*榜上", " ", subject)
+    subject = re.sub(r"(?:喺|在)\s*上", " ", subject)
+    subject = re.sub(r"\s+", " ", subject).strip()
+    if is_ranking_query(normalized):
+        parts = ["KKBOX"]
+        if subject:
+            parts.append(subject)
+        if not contains_any_keyword(" ".join(parts), ("華語", "华语", "粵語", "粤语", "mandopop", "cantopop", "c-pop")):
+            parts.append("華語")
+        parts.extend(["單曲", "週榜", "最新"])
+        return dedupe_search_terms(" ".join(parts))
+    parts = []
+    if subject:
+        parts.append(subject)
+    parts.append("最新")
+    parts.append("新專輯" if wants_album else "新歌")
+    return dedupe_search_terms(" ".join(parts))
+
+
+def route_live_search_with_model(incoming_text):
+    value = clean_text(incoming_text)
+    if not should_consider_live_search_router(value):
+        return {}
+
+    cache_key = ("live_search_router", value)
+
+    def _loader():
+        hinted_mode = detect_live_search_mode(value) if (is_news_query(value) or is_music_query(value)) else "unknown"
+        if is_weather_query(value):
+            hinted_mode = "weather"
+        if hinted_mode == "weather":
+            hinted_query = dedupe_search_terms(value)
+        else:
+            hinted_query = extract_search_query(value, mode="music" if hinted_mode == "music" else "web")
+        prompt = f"""
+用戶訊息：{value}
+目前香港時間：{hk_now().strftime('%Y-%m-%d %H:%M')}
+高概率類別：{hinted_mode}
+原句主體線索：{hinted_query}
+
+請判斷呢句需唔需要查即時外部資料；如果要，就回傳最適合搜尋嘅 mode 同 query。
+如果高概率類別已經係 news 或 music，除非非常明顯唔啱，否則應優先沿用。
+query 要保留主體人物 / 地點 / 品牌名，唔好只輸出日期或者泛詞。
+""".strip()
+        raw = generate_lightweight_router_text(prompt, system_prompt=LIVE_SEARCH_ROUTER_PROMPT)
+        data = parse_json_object(raw)
+        if not data:
+            return {}
+        should_search = bool(data.get("should_search"))
+        mode = clean_text(data.get("mode")).lower()
+        if mode not in {"weather", "news", "music", "web"}:
+            mode = "none"
+        query = dedupe_search_terms(normalize_search_entities(data.get("query") or ""))
+        try:
+            confidence = float(data.get("confidence", 0) or 0)
+        except Exception:
+            confidence = 0.0
+        return {
+            "should_search": should_search and mode in {"weather", "news", "music", "web"},
+            "mode": mode,
+            "query": query,
+            "confidence": max(0.0, min(confidence, 1.0)),
+            "source": "router",
+        }
+
+    try:
+        return cached_live_json(cache_key, _loader, ttl_seconds=LIVE_SEARCH_ROUTER_CACHE_SECONDS)
+    except Exception:
+        return {}
+
+
+def build_live_search_plan(incoming_text):
+    router_plan = route_live_search_with_model(incoming_text)
+    if router_plan.get("should_search") and router_plan.get("mode") in {"weather", "news", "music", "web"}:
+        mode = router_plan["mode"]
+        query = router_plan.get("query") or ""
+        if mode == "weather":
+            query = dedupe_search_terms(query or clean_text(incoming_text))
+        elif mode == "news":
+            query = build_news_search_query(query or extract_search_query(incoming_text, mode=mode))
+        elif mode == "music":
+            query = build_music_search_query(query or extract_search_query(incoming_text, mode=mode))
+        else:
+            query = dedupe_search_terms(normalize_search_entities(query or extract_search_query(incoming_text, mode=mode)))
+        router_plan["query"] = query
+        return router_plan
+    if contains_any_keyword(incoming_text, EXPLICIT_SEARCH_HINTS):
+        mode = detect_live_search_mode(incoming_text)
+        if mode == "weather":
+            query = dedupe_search_terms(clean_text(incoming_text))
+        elif mode == "news":
+            query = build_news_search_query(extract_search_query(incoming_text, mode="web"))
+        elif mode == "music":
+            query = build_music_search_query(extract_search_query(incoming_text, mode="music"))
+        else:
+            query = dedupe_search_terms(normalize_search_entities(extract_search_query(incoming_text, mode="web")))
+        return {
+            "should_search": True,
+            "mode": mode,
+            "query": query,
+            "confidence": 0.35,
+            "source": "explicit_fallback",
+        }
+    return None
+
+
+def decode_duckduckgo_result_url(raw_url):
+    value = html.unescape(raw_url or "").strip()
+    if value.startswith("//"):
+        value = "https:" + value
+    parsed = urlparse(value)
+    if parsed.netloc.endswith("duckduckgo.com"):
+        target = parse_qs(parsed.query).get("uddg", [""])[0]
+        if target:
+            return html.unescape(unquote(target))
+    return value
+
+
+def result_source_label(url):
+    parsed = urlparse(url or "")
+    host = (parsed.netloc or "").lower()
+    host = re.sub(r"^www\.", "", host)
+    return host or "web"
+
+
+def host_matches_domain(host, domain):
+    value = (host or "").lower()
+    target = (domain or "").lower()
+    return value == target or value.endswith("." + target)
+
+
+def find_domain_rank(host, domains):
+    for index, domain in enumerate(domains):
+        if host_matches_domain(host, domain):
+            return index
+    return None
+
+
+def lexical_query_overlap_score(query, haystack):
+    score = 0
+    lowered = clean_text(haystack).lower()
+    for term in dedupe_search_terms(query).lower().split():
+        if len(term) <= 1:
+            continue
+        if term in lowered:
+            score += 6
+    return score
+
+
+def score_search_result(item, mode, query, index=0):
+    url = clean_text(item.get("url"))
+    host = result_source_label(url)
+    title = clean_text(item.get("title"))
+    snippet = clean_text(item.get("snippet"))
+    haystack = " ".join(
+        clean_text(item.get(key))
+        for key in ("title", "snippet", "source", "published_at")
+    )
+    score = max(0, 30 - index)
+    score += lexical_query_overlap_score(query, haystack)
+    if mode == "news":
+        domain_rank = find_domain_rank(host, HK_NEWS_PREFERRED_DOMAINS)
+        if domain_rank is None:
+            domain_rank = find_domain_rank(host, GLOBAL_NEWS_PREFERRED_DOMAINS)
+            if domain_rank is not None:
+                score += max(6, 18 - domain_rank * 2)
+        else:
+            score += max(12, 28 - domain_rank * 3)
+        if clean_text(item.get("published_at")):
+            score += 8
+    elif mode == "music":
+        domain_rank = find_domain_rank(host, MUSIC_PREFERRED_DOMAINS)
+        if domain_rank is not None:
+            score += max(8, 16 - domain_rank * 2)
+        freshness_terms = ("最新", "新歌", "單曲", "单曲", "專輯", "专辑", "single", "album", "mv", "發行", "发行", "release", "released")
+        if contains_any_keyword(haystack, freshness_terms):
+            score += 12
+        else:
+            score -= 6
+        if contains_any_keyword(title, ("YouTube", "YouTube Music", "全部歌曲")) and not contains_any_keyword(title + " " + snippet, freshness_terms):
+            score -= 12
+    elif mode == "music_chart":
+        domain_rank = find_domain_rank(host, CHART_PREFERRED_DOMAINS)
+        if domain_rank is not None:
+            score += max(18, 32 - domain_rank * 3)
+        chart_terms = ("排行榜", "排行", "榜單", "榜单", "週榜", "周榜", "月榜", "top 10", "top10", "前十", "單曲榜", "单曲榜")
+        if contains_any_keyword(haystack, chart_terms):
+            score += 18
+        else:
+            score -= 10
+        if contains_any_keyword(title + " " + snippet, ("YouTube", "YouTube Music", "playlist", "歌單", "歌单")) and not contains_any_keyword(haystack, chart_terms):
+            score -= 18
+    return score
+
+
+def rank_search_results(results, mode, query):
+    deduped = {}
+    for index, item in enumerate(results or []):
+        url = clean_text((item or {}).get("url"))
+        if not url:
+            continue
+        normalized_url = url.lower().rstrip("/")
+        candidate = {
+            "title": clean_text(item.get("title")),
+            "snippet": clean_text(item.get("snippet")),
+            "url": url,
+            "source": clean_text(item.get("source")),
+            "published_at": clean_text(item.get("published_at")),
+            "_score": score_search_result(item, mode, query, index=index),
+        }
+        existing = deduped.get(normalized_url)
+        if not existing or candidate["_score"] > existing["_score"]:
+            deduped[normalized_url] = candidate
+    ranked = sorted(
+        deduped.values(),
+        key=lambda item: (item["_score"], clean_text(item.get("published_at"))),
+        reverse=True,
+    )
+    return [
+        {key: value for key, value in item.items() if key != "_score"}
+        for item in ranked
+    ]
+
+
+def parse_duckduckgo_results(html_text, limit=5):
+    pattern = re.compile(
+        r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
+        re.S,
+    )
+    results = []
+    for match in pattern.finditer(html_text or ""):
+        raw_url, raw_title, raw_snippet = match.groups()
+        title = clean_text(re.sub(r"<.*?>", " ", html.unescape(raw_title)))
+        snippet = clean_text(re.sub(r"<.*?>", " ", html.unescape(raw_snippet)))
+        url = decode_duckduckgo_result_url(raw_url)
+        if not title or not url:
+            continue
+        results.append(
+            {
+                "title": title,
+                "snippet": snippet,
+                "url": url,
+                "source": result_source_label(url),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def search_duckduckgo_web(query, limit=5):
+    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"}, method="GET")
+    with urlopen(request, timeout=20) as response:
+        raw_html = response.read().decode("utf-8", "ignore")
+    return parse_duckduckgo_results(raw_html, limit=limit)
+
+
+def parse_google_news_results(xml_text, limit=5):
+    root = ET.fromstring(xml_text)
+    results = []
+    for item in root.findall("./channel/item"):
+        title = clean_text(item.findtext("title"))
+        link = clean_text(item.findtext("link"))
+        published_raw = clean_text(item.findtext("pubDate"))
+        published_label = published_raw
+        if published_raw:
+            try:
+                published_dt = parsedate_to_datetime(published_raw).astimezone(HK_TZ)
+                published_label = published_dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                published_label = published_raw
+        source = ""
+        if " - " in title:
+            title_parts = title.rsplit(" - ", 1)
+            if len(title_parts) == 2:
+                title, source = title_parts
+        description = clean_text(re.sub(r"<.*?>", " ", html.unescape(item.findtext("description") or "")))
+        results.append(
+            {
+                "title": title,
+                "snippet": description,
+                "url": link,
+                "source": source or "Google News",
+                "published_at": published_label,
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def search_google_news(query, limit=5):
+    url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=zh-HK&gl=HK&ceid=HK:zh-Hant"
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"}, method="GET")
+    with urlopen(request, timeout=20) as response:
+        xml_text = response.read().decode("utf-8", "ignore")
+    return parse_google_news_results(xml_text, limit=limit)
+
+
+def search_music_results(query, limit=5, ranking_query=False):
+    web_results = cached_live_json(
+        ("duckduckgo_music", query),
+        lambda: search_duckduckgo_web(query, limit=max(limit * 2, 8)),
+        ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+    )
+    news_results = cached_live_json(
+        ("google_news_music", query),
+        lambda: search_google_news(query, limit=max(limit, 5)),
+        ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+    )
+    mode = "music_chart" if ranking_query else "music"
+    return rank_search_results((web_results or []) + (news_results or []), mode, query)[:limit]
+
+
+def extract_quoted_titles(text, max_titles=8):
+    value = clean_text(text)
+    if not value:
+        return []
+    titles = []
+    seen = set()
+    for match in re.finditer(r"[《〈「『]([^《》〈〉「」『』]{1,40})[》〉」』]", value):
+        title = clean_text(match.group(1)).strip("《》〈〉「」『』")
+        key = normalize_key(title)
+        if not title or len(title) < 2 or key in seen:
+            continue
+        seen.add(key)
+        titles.append(title)
+        if len(titles) >= max_titles:
+            break
+    return titles
+
+
+def collect_chart_source_labels(results, limit=2):
+    labels = []
+    seen = set()
+    for item in results or []:
+        host = result_source_label(clean_text(item.get("url")))
+        if find_domain_rank(host, CHART_PREFERRED_DOMAINS) is None:
+            continue
+        label = clean_text(item.get("source")) or host
+        key = normalize_key(label)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+def collect_music_title_candidates(results, max_titles=10):
+    titles = []
+    seen = set()
+    for item in results or []:
+        for raw_text in (item.get("title"), item.get("snippet")):
+            for title in extract_quoted_titles(raw_text, max_titles=max_titles):
+                key = normalize_key(title)
+                if key in seen:
+                    continue
+                seen.add(key)
+                titles.append(title)
+                if len(titles) >= max_titles:
+                    return titles
+    return titles
+
+
+def build_music_chart_guard_reply(incoming_text, results):
+    if not is_ranking_query(incoming_text):
+        return None
+    chart_results = [
+        item for item in (results or [])
+        if find_domain_rank(result_source_label(clean_text(item.get("url"))), CHART_PREFERRED_DOMAINS) is not None
+    ]
+    titles = collect_music_title_candidates(chart_results or results, max_titles=10)
+    source_labels = collect_chart_source_labels(chart_results)
+    source_text = " / ".join(source_labels)
+    wants_count = contains_any_keyword(incoming_text, COUNT_QUERY_HINTS)
+
+    if chart_results and len(titles) >= 8:
+        joined_titles = "、".join(f"《{title}》" for title in titles[:10])
+        prefix = f"bb 我喺 {source_text} 呢啲榜單結果入面" if source_text else "bb 我喺而家搵到嘅榜單結果入面"
+        return f"{prefix}明確見到排前面嘅歌有 {joined_titles}。"
+
+    if source_text:
+        if wants_count:
+            return f"bb 我而家只搵到 {source_text} 相關結果，但未見到完整可靠嘅榜單內容，所以唔敢當真幫你數住。"
+        return f"bb 我而家只搵到 {source_text} 相關結果，但未見到完整可靠嘅榜單內容，所以唔敢亂報歌名住。"
+    if wants_count:
+        return "bb 我而家未搵到一個完整可靠嘅榜單頁，所以唔敢當真幫你數住，免得同你作咗出嚟。"
+    return "bb 我而家未搵到一個完整可靠嘅排行榜頁，所以唔敢亂報歌名住，免得同你作咗出嚟。"
+
+
+def build_search_review_lines(results, limit=4):
+    lines = []
+    for index, item in enumerate(results[:limit], start=1):
+        bits = [f"{index}. {clean_text(item.get('title'))}"]
+        if clean_text(item.get("source")):
+            bits.append(f"來源={clean_text(item.get('source'))}")
+        if clean_text(item.get("published_at")):
+            bits.append(f"時間={clean_text(item.get('published_at'))}")
+        if clean_text(item.get("snippet")):
+            bits.append(f"摘要={clean_text(item.get('snippet'))}")
+        if clean_text(item.get("url")):
+            bits.append(f"連結={clean_text(item.get('url'))}")
+        lines.append(" | ".join(bit for bit in bits if bit))
+    return lines
+
+
+def review_live_search_results(incoming_text, effective_text, mode, search_query, results):
+    if mode == "weather":
+        return {"decision": "answer", "refined_query": "", "reason": "", "confidence": 0.99}
+    review_lines = build_search_review_lines(results)
+    if not review_lines:
+        return {"decision": "abstain", "refined_query": "", "reason": "未搵到結果", "confidence": 0.98}
+
+    prompt = f"""
+用戶原問題：{clean_text(incoming_text)}
+補充上下文：{clean_text(effective_text)}
+搜尋模式：{mode}
+目前 query：{clean_text(search_query)}
+目前香港時間：{hk_now().strftime('%Y-%m-%d %H:%M')}
+
+搜尋結果：
+{chr(10).join(review_lines)}
+""".strip()
+    try:
+        raw = generate_lightweight_router_text(prompt, system_prompt=LIVE_SEARCH_REVIEW_PROMPT)
+        data = parse_json_object(raw)
+    except Exception:
+        data = {}
+
+    decision = clean_text((data or {}).get("decision")).lower()
+    if decision not in {"answer", "refine", "abstain"}:
+        decision = "answer"
+    refined_query = dedupe_search_terms(normalize_search_entities((data or {}).get("refined_query") or ""))
+    reason = clean_text((data or {}).get("reason"))
+    try:
+        confidence = float((data or {}).get("confidence", 0) or 0)
+    except Exception:
+        confidence = 0.0
+    return {
+        "decision": decision,
+        "refined_query": refined_query,
+        "reason": reason,
+        "confidence": max(0.0, min(confidence, 1.0)),
+    }
+
+
+def build_live_search_abstain_reply(mode, results, review_reason=""):
+    source_labels = []
+    seen = set()
+    for item in results or []:
+        label = clean_text(item.get("source")) or result_source_label(clean_text(item.get("url")))
+        key = normalize_key(label)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        source_labels.append(label)
+        if len(source_labels) >= 2:
+            break
+    source_text = " / ".join(source_labels)
+    reason_text = clean_text(review_reason)
+    if mode == "news":
+        if source_text:
+            return f"bb 我而家只搵到 {source_text} 呢批結果，但仲未夠我穩陣咁講死住。"
+        return "bb 我而家搵到嘅新聞結果仲未夠穩陣，所以唔想同你講死住。"
+    if mode == "music":
+        if source_text:
+            return f"bb 我而家只搵到 {source_text} 呢批結果，但仲未夠直接，所以唔想亂答你。"
+        return "bb 我而家搵到嘅音樂結果仲未夠直接，所以唔想亂答你。"
+    if source_text:
+        if reason_text:
+            return f"bb 我而家只搵到 {source_text} 呢批結果，但 {reason_text}，所以唔想亂答住。"
+        return f"bb 我而家只搵到 {source_text} 呢批結果，但仲未夠直接，所以唔想亂答住。"
+    if reason_text:
+        return f"bb 我而家搵到嘅結果仲未夠穩陣，{reason_text}，所以唔想亂答住。"
+    return "bb 我而家搵到嘅結果仲未夠穩陣，所以唔想亂答住。"
+
+
+def fetch_live_search_results(mode, search_query, effective_text):
+    if mode == "weather":
+        weather_summary = build_live_weather_reply(effective_text)
+        if not weather_summary:
+            return []
+        return [
+            {
+                "title": "香港天文台官方資料",
+                "source": "香港天文台",
+                "published_at": hk_now().strftime("%Y-%m-%d %H:%M"),
+                "snippet": weather_summary,
+                "url": "https://www.hko.gov.hk/",
+            }
+        ]
+    if mode == "news":
+        return rank_search_results(
+            cached_live_json(
+                ("google_news", search_query),
+                lambda: search_google_news(search_query, limit=8),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+            mode,
+            search_query,
+        )
+    if mode == "music":
+        return search_music_results(search_query, limit=6, ranking_query=is_ranking_query(effective_text))
+    return rank_search_results(
+        cached_live_json(
+            ("duckduckgo_web", search_query),
+            lambda: search_duckduckgo_web(search_query, limit=8),
+            ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+        ),
+        mode,
+        search_query,
+    )
+
+
+def trim_search_snippet(text, max_length=110):
+    value = clean_text(text)
+    if len(value) <= max_length:
+        return value
+    shortened = value[:max_length].rstrip("，。；、,:; ")
+    return shortened + "…"
+
+
+def normalize_live_search_reply(reply):
+    text = str(reply or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    lines = [clean_text(line) for line in text.split("\n") if clean_text(line)]
+    if not lines:
+        return ""
+
+    normalized_lines = []
+    for line in lines:
+        line = re.sub(r"^\s*[-*•]+\s*", "", line)
+        line = re.sub(r"^\s*\d+[.)、]\s*", "", line)
+        normalized_lines.append(line)
+
+    text = "\n".join(normalized_lines)
+    if len(normalized_lines) >= 3:
+        text = "；".join(normalized_lines).strip()
+    text = re.sub(r"([：:])\s*\n+", r"\1 ", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    text = text.strip()
+    if text.endswith(("：", ":")):
+        text = text[:-1].rstrip(" ，。；、")
+        if text:
+            text += "。"
+    return text
+
+
+def extract_named_work(text):
+    value = clean_text(text)
+    for pattern in (r"《([^》]{1,40})》", r"「([^」]{1,40})」", r"^([^-\|]{1,40})\s*-\s*[^-\|]+$"):
+        match = re.search(pattern, value)
+        if match:
+            name = clean_text(match.group(1)).strip("《》「」")
+            if name and len(name) >= 2:
+                return name
+    return ""
+
+
+def fallback_live_search_reply(query, mode, results):
+    if not results:
+        return "我啱啱上網幫你搵過，但暫時未見到夠清楚嘅結果，你想唔想我換個關鍵字再查？"
+    if mode == "weather":
+        top = results[0]
+        snippet = clean_text(top.get("snippet"))
+        return snippet or "我啱啱查咗官方天氣資料，但暫時未整理到夠清楚，你隔一陣再問我一次好唔好？"
+    if mode == "news":
+        pieces = []
+        for item in results[:2]:
+            title = clean_text(item.get("title"))
+            source = clean_text(item.get("source"))
+            published_at = clean_text(item.get("published_at"))
+            meta = " / ".join(bit for bit in (source, published_at) if bit)
+            if meta:
+                pieces.append(f"{title}（{meta}）")
+            else:
+                pieces.append(title)
+        return "我幫你睇咗最新消息，而家比較近嘅有：" + "；".join(piece for piece in pieces if piece) + "。如果你想，我可以再幫你追其中一條。"
+    if mode == "music":
+        top = results[0]
+        title = clean_text(top.get("title"))
+        source = clean_text(top.get("source"))
+        snippet = clean_text(top.get("snippet"))
+        work_name = extract_named_work(snippet) or extract_named_work(title)
+        is_album = contains_any_keyword(title + " " + snippet, ("專輯", "专辑", "album"))
+        if work_name:
+            kind = "新專輯" if is_album else "新歌"
+            return f"如果你係想問最新嗰首，我啱啱上網見到而家較多結果都指向{kind}《{work_name}》。你想我再幫你由呢批最新作品入面揀邊首多人講都得。"
+        meta = f"（{source}）" if source else ""
+        if snippet:
+            return f"如果你係想問最新嗰首，我啱啱上網睇到最貼近嘅資料係 {title}{meta}；摘要提到：{trim_search_snippet(snippet)}。你想我再幫你揀下邊首多人講都得。"
+        return f"如果你係想問最新嗰首，我啱啱上網搵到而家最貼近嘅結果係 {title}{meta}。你想我再幫你睇下邊首多人講都得。"
+
+    top = results[0]
+    source = clean_text(top.get("source"))
+    title = clean_text(top.get("title"))
+    snippet = trim_search_snippet(top.get("snippet"))
+    if snippet:
+        if contains_any_keyword(query, ("係唔係", "是不是", "會唔會", "有冇", "有沒有")):
+            return f"我啱啱上網睇到，{source or '第一個結果'} 上面寫緊：{snippet}。如果你想，我可以再幫你睇多一兩個來源。"
+        return f"我啱啱上網睇到，{title} 呢條結果最貼近你想問嘅嘢；摘要大概係：{snippet}。如果你想，我可以再幫你展開查。"
+    return f"我啱啱上網搵到最貼近嘅結果係 {title}。如果你想，我可以再幫你睇多幾個來源。"
+
+
+def build_live_search_reply(incoming_text, conn=None, wa_id=""):
+    effective_text = expand_live_search_followup_text(conn, wa_id, incoming_text)
+    plan = build_live_search_plan(effective_text)
+    if not plan or not plan.get("should_search"):
+        return None
+
+    mode = plan.get("mode") or "web"
+    search_query = clean_text(plan.get("query"))
+    try:
+        results = fetch_live_search_results(mode, search_query, effective_text)
+    except Exception:
+        return "我啱啱上網查資料嗰下失敗咗，未夠把握就唔想亂答，你隔一陣再問我一次好唔好？"
+
+    if not results:
+        return "我啱啱上網幫你搵過，但暫時未見到夠準嘅結果，要唔要你換個講法我再查？"
+
+    if mode in {"news", "music", "web"}:
+        review = review_live_search_results(incoming_text, effective_text, mode, search_query, results)
+        if review.get("decision") == "refine":
+            refined_query = clean_text(review.get("refined_query"))
+            if refined_query and refined_query != search_query:
+                search_query = refined_query
+                try:
+                    results = fetch_live_search_results(mode, search_query, effective_text)
+                except Exception:
+                    return "我啱啱上網查資料嗰下失敗咗，未夠把握就唔想亂答，你隔一陣再問我一次好唔好？"
+                if not results:
+                    return "我啱啱上網幫你搵過，但暫時未見到夠準嘅結果，要唔要你換個講法我再查？"
+                review = review_live_search_results(incoming_text, effective_text, mode, search_query, results)
+        if review.get("decision") == "abstain":
+            music_chart_guard_reply = build_music_chart_guard_reply(effective_text, results)
+            if music_chart_guard_reply:
+                return music_chart_guard_reply
+            return build_live_search_abstain_reply(mode, results, review_reason=review.get("reason"))
+
+    music_chart_guard_reply = build_music_chart_guard_reply(effective_text, results)
+    if music_chart_guard_reply:
+        return music_chart_guard_reply
+
+    search_lines = []
+    for index, item in enumerate(results[:5], start=1):
+        bits = [f"{index}. {clean_text(item.get('title'))}"]
+        if clean_text(item.get("source")):
+            bits.append(f"來源：{clean_text(item.get('source'))}")
+        if clean_text(item.get("published_at")):
+            bits.append(f"時間：{clean_text(item.get('published_at'))}")
+        if clean_text(item.get("snippet")):
+            bits.append(f"摘要：{clean_text(item.get('snippet'))}")
+        if clean_text(item.get("url")):
+            bits.append(f"連結：{clean_text(item.get('url'))}")
+        search_lines.append("\n".join(bits))
+
+    extra_context_line = ""
+    if clean_text(effective_text) != clean_text(incoming_text):
+        extra_context_line = f"補充上下文：{clean_text(effective_text)}\n"
+
+    prompt = f"""
+用戶剛剛問：{clean_text(incoming_text)}
+{extra_context_line}實際搜尋關鍵字：{search_query}
+目前香港時間：{hk_now().strftime('%Y-%m-%d %H:%M')}
+搜尋模式：{"官方天氣資料" if mode == "weather" else ("最新新聞" if mode == "news" else ("音樂 / 新歌搜尋" if mode == "music" else "網頁搜尋"))}
+
+搜尋結果：
+{chr(10).join(search_lines)}
+
+回覆要求：
+- 先直接答用戶最想知嘅重點
+- 只可以根據以上搜尋結果內容
+- 如果係天氣 / 即時資料，直接用自然口吻講清楚重點，似蘇蘇真係幫佢查完再覆
+- 如果用戶問「邊首好聽」呢類主觀問題，先講客觀可驗證部分，例如最新發行或者最近多來源提到嘅歌名，再清楚講明你只係按搜尋結果推斷
+- 如果結果未夠直接回答，就講暫時見到嘅結果未夠準
+- 用繁體港式廣東話，似自然 WhatsApp
+- 可以好短，但要完整
+- 唔好用逐行清單、項目符號，盡量用 1 到 2 句自然講完；如果真係要提幾個結果，都寫成同一句入面
+- 唔好用「見到嘅係：」之後另起多行但冇內容
+- 只輸出回覆本身
+""".strip()
+    try:
+        reply = shorten_whatsapp_reply(
+            normalize_live_search_reply(
+            generate_model_text(
+                prompt,
+                temperature=0.15,
+                max_tokens=220,
+                system_prompt=build_live_search_system_prompt(),
+            )),
+            night_mode=is_night_mode(),
+        )
+        if reply:
+            return reply
+    except Exception:
+        pass
+    return fallback_live_search_reply(search_query, mode, results)
 
 
 def normalize_key(value):
@@ -507,8 +1770,7 @@ def build_filtered_long_term_memory_lines(rows, primary_text, limit=20):
 
 def primary_profile_memory_for_wa(wa_id, settings=None):
     settings = settings or get_runtime_settings()
-    admin_wa_id = clean_text(ADMIN_WA_ID)
-    if admin_wa_id and clean_text(wa_id) != admin_wa_id:
+    if (wa_id or "").strip() != ADMIN_WA_ID:
         return ""
     return settings.get("primary_user_memory", "")
 
@@ -520,7 +1782,6 @@ def ensure_column(conn, table_name, column_name, ddl):
 
 
 def get_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -591,7 +1852,7 @@ def get_db():
             memory_key TEXT NOT NULL DEFAULT '',
             source_bucket TEXT NOT NULL DEFAULT 'within_7d',
             observed_at TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT '',
             archived_at TEXT NOT NULL
         )
         """
@@ -729,6 +1990,42 @@ def send_whatsapp_text(to_number, body):
         return json.loads(raw) if raw else {"ok": True}
 
 
+def send_whatsapp_status_update(message_id, typing=False):
+    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
+        return {"ok": False, "detail": "Missing WhatsApp credentials"}
+    if not message_id:
+        return {"ok": False, "detail": "Missing message_id"}
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id,
+    }
+    if typing:
+        payload["typing_indicator"] = {"type": "text"}
+
+    request = Request(
+        f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {ACCESS_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=15) as response:
+        raw = response.read().decode("utf-8")
+        return json.loads(raw) if raw else {"ok": True}
+
+
+def send_whatsapp_mark_as_read(message_id):
+    return send_whatsapp_status_update(message_id, typing=False)
+
+
+def send_whatsapp_typing_indicator(message_id):
+    return send_whatsapp_status_update(message_id, typing=True)
+
+
 def graph_get_json(path):
     request = Request(
         f"https://graph.facebook.com/{GRAPH_VERSION}/{path.lstrip('/')}",
@@ -777,26 +2074,18 @@ def split_reply_bubbles(reply_text, night_mode=False):
     if not text:
         return []
 
-    max_bubbles = 4 if night_mode else 3
-    if len(text) < 26:
-        return [text]
-
     chunks = [chunk.strip() for chunk in re.split(r"\n+", text) if chunk.strip()]
     if len(chunks) >= 2:
-        return chunks[:max_bubbles]
+        return chunks
 
     parts = re.findall(
-        r".+?(?:[。！？!?…]+(?:[🥺😭😂😏🤭💕💖💗💘🫶✨😤🤍❤️💛💚💙💜🩷🩵]*\s*)|$)",
+        r".+?(?:[。！？!?~～…]+(?:[🥺😭😂😏🤭💕💖💗💘🫶✨😤🤍❤️💛💚💙💜🩷🩵]*\s*)|$)",
         text,
     )
     sentences = [part.strip() for part in parts if part.strip()]
     if len(sentences) <= 1:
         return [text]
-    if len(sentences) <= max_bubbles:
-        return sentences
-    head = sentences[: max_bubbles - 1]
-    tail = " ".join(sentences[max_bubbles - 1 :]).strip()
-    return head + ([tail] if tail else [])
+    return sentences
 
 
 def split_followup_style(bubble):
@@ -867,6 +2156,44 @@ def has_processed_message(conn, message_id):
         (message_id,),
     ).fetchone()
     return bool(row)
+
+
+def mark_reply_worker_dirty(wa_id, profile_name=""):
+    should_start = False
+    with _reply_worker_states_lock:
+        state = _reply_worker_states.setdefault(
+            wa_id,
+            {"version": 0, "profile_name": "", "running": False},
+        )
+        state["version"] += 1
+        if profile_name:
+            state["profile_name"] = profile_name
+        if not state["running"]:
+            state["running"] = True
+            should_start = True
+        version = state["version"]
+    return should_start, version
+
+
+def get_reply_worker_snapshot(wa_id):
+    with _reply_worker_states_lock:
+        state = _reply_worker_states.setdefault(
+            wa_id,
+            {"version": 0, "profile_name": "", "running": False},
+        )
+        return state["version"], state["profile_name"], state["running"]
+
+
+def finish_reply_worker_if_idle(wa_id, observed_version):
+    with _reply_worker_states_lock:
+        state = _reply_worker_states.setdefault(
+            wa_id,
+            {"version": 0, "profile_name": "", "running": False},
+        )
+        if state["version"] != observed_version:
+            return False
+        state["running"] = False
+        return True
 
 
 def load_recent_messages(conn, wa_id, limit=12):
@@ -1105,7 +2432,9 @@ def archive_query_keywords(text):
 
     def push(token):
         token = clean_text(token).lower()
-        if not token or token in seen:
+        if not token:
+            return
+        if token in seen:
             return
         seen.add(token)
         tokens.append(token)
@@ -1398,6 +2727,25 @@ def get_latest_inbound_id(conn, wa_id):
     return int(row["id"]) if row else 0
 
 
+def get_latest_inbound_id_for_wa(wa_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM wa_messages
+            WHERE wa_id = ? AND direction = 'inbound'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (wa_id,),
+        ).fetchone()
+        return int(row["id"]) if row else 0
+    finally:
+        conn.close()
+
+
 def load_pending_inbound_batch(conn, wa_id, current_inbound_id):
     last_outbound = conn.execute(
         """
@@ -1410,7 +2758,7 @@ def load_pending_inbound_batch(conn, wa_id, current_inbound_id):
     last_outbound_id = int(last_outbound["last_outbound_id"]) if last_outbound else 0
     rows = conn.execute(
         """
-        SELECT id, body, message_type, raw_json
+        SELECT id, message_id, body, message_type, raw_json
         FROM wa_messages
         WHERE wa_id = ?
           AND direction = 'inbound'
@@ -1582,6 +2930,23 @@ def parse_json_array(raw_text):
     return data if isinstance(data, list) else []
 
 
+def parse_json_object(raw_text):
+    text = (raw_text or "").strip()
+    if not text:
+        return {}
+    text = re.sub(r"^```(?:json)?", "", text).strip()
+    text = re.sub(r"```$", "", text).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return {}
+    try:
+        data = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def heuristic_extract_memories(incoming_text):
     text = clean_text(incoming_text)
     extra = []
@@ -1597,7 +2962,7 @@ def heuristic_extract_memories(incoming_text):
         "不催我睡覺",
     ]
     if any(item in text or item in lowered for item in sleep_boundaries):
-        extra.append("對方夜晚唔鍾意被催瞓，除非佢主動話想瞓或者叫你哄佢瞓。")
+        extra.append("Simon夜晚唔鍾意被催瞓，除非佢主動話想瞓或者叫你哄佢瞓。")
     patterns = [
         r"^(我最近開始[^。！？!?]{4,60})",
         r"^(我而家用[^。！？!?]{4,60})",
@@ -1743,7 +3108,7 @@ def call_groq(prompt_text, temperature=0.82, max_tokens=220, system_prompt=None,
 
 def generate_model_text(prompt_text, temperature=0.82, max_tokens=220, system_prompt=None, image_inputs=None):
     errors = []
-    relay_primary, relay_secondary = get_relay_model_order()
+    relay_primary, _ = get_relay_model_order()
 
     if RELAY_API_KEY and relay_primary:
         try:
@@ -1755,45 +3120,24 @@ def generate_model_text(prompt_text, temperature=0.82, max_tokens=220, system_pr
         except Exception as exc:
             errors.append(f"relay_failed:{type(exc).__name__}")
 
-    if RELAY_API_KEY and relay_secondary:
+    if errors:
+        raise RuntimeError(";".join(errors))
+    return ""
+
+
+def generate_lightweight_router_text(prompt_text, system_prompt=None):
+    errors = []
+    relay_primary, _ = get_relay_model_order()
+
+    if RELAY_API_KEY and relay_primary:
         try:
-            return call_relay_model(relay_secondary, prompt_text, temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt, image_inputs=image_inputs)
+            return call_relay_model(relay_primary, prompt_text, temperature=0.0, max_tokens=160, system_prompt=system_prompt)
         except HTTPError as exc:
-            errors.append(f"relay_fallback_http_{exc.code}")
+            errors.append(f"router_relay_http_{exc.code}")
             if exc.code not in (401, 403, 429, 500, 502, 503, 504):
                 raise
         except Exception as exc:
-            errors.append(f"relay_fallback_failed:{type(exc).__name__}")
-
-    if GEMINI_API_KEY:
-        try:
-            return call_gemini(prompt_text, temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt, image_inputs=image_inputs)
-        except HTTPError as exc:
-            errors.append(f"gemini_http_{exc.code}")
-            if exc.code not in (429, 500, 502, 503, 504):
-                raise
-        except Exception as exc:
-            errors.append(f"gemini_failed:{type(exc).__name__}")
-
-    if MINIMAX_API_KEY:
-        try:
-            return call_minimax(prompt_text, temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt, image_inputs=image_inputs)
-        except HTTPError as exc:
-            errors.append(f"minimax_http_{exc.code}")
-            if exc.code not in (401, 403, 429, 500, 502, 503, 504):
-                raise
-        except Exception as exc:
-            errors.append(f"minimax_failed:{type(exc).__name__}")
-
-    if GROQ_API_KEY:
-        try:
-            return call_groq(prompt_text, temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt, image_inputs=image_inputs)
-        except HTTPError as exc:
-            errors.append(f"groq_http_{exc.code}")
-            if exc.code not in (401, 403, 429, 500, 502, 503, 504):
-                raise
-        except Exception as exc:
-            errors.append(f"groq_failed:{type(exc).__name__}")
+            errors.append(f"router_relay_failed:{type(exc).__name__}")
 
     if errors:
         raise RuntimeError(";".join(errors))
@@ -1814,7 +3158,7 @@ def extract_preference_memories(incoming_text):
         "別催我睡覺",
         "别催我睡觉",
     ]):
-        extracted.append("對方夜晚唔鍾意被催瞓，除非佢主動話想瞓或者叫你哄佢瞓。")
+        extracted.append("Simon夜晚唔鍾意被催瞓，除非佢主動話想瞓或者叫你哄佢瞓。")
     return extracted
 
 
@@ -2024,6 +3368,19 @@ def heuristic_extract_session_memories(incoming_text):
     return deduped[:4]
 
 
+def extract_live_search_question_memory(incoming_text):
+    plan = build_live_search_plan(incoming_text)
+    if not plan or not plan.get("should_search"):
+        return None
+    value = clean_text(incoming_text).rstrip("，。!?！？")
+    if len(value) < 4:
+        return None
+    return {
+        "bucket": "within_24h",
+        "content": f"對方啱啱問過：{value}",
+    }
+
+
 def maybe_extract_session_memories(conn, wa_id, incoming_text):
     prompt = f"""
 對方剛剛講：
@@ -2038,6 +3395,7 @@ def maybe_extract_session_memories(conn, wa_id, incoming_text):
 - 長期背景、長期偏好、長期習慣
 - 冇資訊量嘅撒嬌、純情緒、客套句
 - 太私密或太敏感細節
+- 但如果對方啱啱問即時資訊，例如新聞、天氣、最新作品、股價、比賽結果，呢條「問過咩」本身都算短期記憶
 
 最多 4 項。
 """.strip()
@@ -2057,6 +3415,10 @@ def maybe_extract_session_memories(conn, wa_id, incoming_text):
 
     if not extracted:
         extracted = heuristic_extract_session_memories(incoming_text)
+
+    live_search_question = extract_live_search_question_memory(incoming_text)
+    if live_search_question:
+        extracted.insert(0, live_search_question)
 
     saved = []
     for item in extracted:
@@ -2155,9 +3517,9 @@ def build_proactive_prompt(conn, wa_id, profile_name, now=None):
     within_3d_memories = format_session_memory_lines(conn, wa_id, "within_3d", limit=4)
     within_7d_memories = format_session_memory_lines(conn, wa_id, "within_7d", limit=4)
     image_stats_text = load_image_stats_summary(conn, wa_id)
-    core_profile_text = build_core_profile_memory_text(primary_text) if primary_text else "（暫時未有核心檔案）"
 
     history_text = "\n".join(history_lines[-8:]) if history_lines else "（最近未有聊天）"
+    core_profile_text = build_core_profile_memory_text(primary_text) if primary_text else "（主號核心檔案暫未設定）"
     memory_text = "\n".join(dynamic_memories) if dynamic_memories else "（暫時未有補充長期記憶）"
     within_24h_text = "\n".join(within_24h_memories) if within_24h_memories else "（暫時未有 24 小時內記憶）"
     within_3d_text = "\n".join(within_3d_memories) if within_3d_memories else "（暫時未有三天內記憶）"
@@ -2170,7 +3532,7 @@ def build_proactive_prompt(conn, wa_id, profile_name, now=None):
     return f"""
 對方 WhatsApp 顯示名稱：{profile_name or "對方"}
 
-核心檔案：
+主號核心檔案：
 {core_profile_text}
 
 補充長期記憶（已避開與核心檔案重複項）：
@@ -2718,6 +4080,7 @@ def reminder_loop():
 def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
     settings = get_runtime_settings()
     primary_text = primary_profile_memory_for_wa(wa_id, settings)
+    lookup_archive = should_lookup_archive(incoming_text)
     history_lines = []
     quotable = []  # [(message_id, preview)]
     for item in load_recent_messages(conn, wa_id):
@@ -2738,7 +4101,6 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
             quotable.append((msg_id, body[:40]))
 
     dynamic_memories = build_filtered_long_term_memory_lines(load_memories(conn, wa_id), primary_text, limit=20)
-    lookup_archive = should_lookup_archive(incoming_text)
     within_24h_memories = format_session_memory_lines(conn, wa_id, "within_24h", limit=6)
     within_3d_memories = format_session_memory_lines(conn, wa_id, "within_3d", limit=6)
     within_7d_memories = format_session_memory_lines(conn, wa_id, "within_7d", limit=6)
@@ -2749,7 +4111,7 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
             limit=4,
         )
     history_text = "\n".join(history_lines[-12:]) if history_lines else "（暂时未有最近聊天）"
-    habit_text = build_core_profile_memory_text(primary_text) if primary_text else "（暫時未有核心檔案）"
+    habit_text = build_core_profile_memory_text(primary_text) if primary_text else "（主號核心檔案暫未設定）"
     memory_text = "\n".join(dynamic_memories) if dynamic_memories else "（暂时未有补充长期记忆）"
     within_24h_text = "\n".join(within_24h_memories) if within_24h_memories else "（暂时未有 24 小时内记忆）"
     within_3d_text = "\n".join(within_3d_memories) if within_3d_memories else "（暂时未有三天内记忆）"
@@ -2759,7 +4121,7 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
     if lookup_archive:
         archive_section = f"""
 
-過往歸檔記憶（7 天前，只在對方追問舊事時優先參考）：
+过往归档记忆（7 天前，只在对方追问旧事时优先参考）：
 {archived_text}"""
     image_stats_text = load_image_stats_summary(conn, wa_id)
     prompt_user_text = clean_text(incoming_text) or "（对方这次只发了图片，没有额外文字）"
@@ -2794,7 +4156,7 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
     return f"""
 对方 WhatsApp 显示名称：{profile_name or "对方"}
 
-核心檔案：
+主號核心檔案：
 {habit_text}
 
 補充長期記憶（已避開與核心檔案重複項）：
@@ -2848,30 +4210,6 @@ def shorten_whatsapp_reply(reply, night_mode=False):
     text = normalize_reply(reply)
     if not text:
         return text
-
-    max_lines = 3 if night_mode else 2
-    max_sentences = 3 if night_mode else 2
-    max_len = 120 if night_mode else 72
-    min_cut = 45 if night_mode else 30
-
-    lines = [line.strip() for line in text.split("\n") if line.strip()]
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-    text = "\n".join(lines)
-
-    sentences = re.split(r"(?<=[。！？!?~～…])\s*", text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    if len(sentences) > max_sentences:
-        text = " ".join(sentences[:max_sentences]).strip()
-
-    if len(text) > max_len:
-        trimmed = text[:max_len].rstrip()
-        cut = max(trimmed.rfind(mark) for mark in ["。", "！", "？", "!", "?", "~", "～", "…", " "])
-        if cut > min_cut:
-            text = trimmed[: cut + 1].strip()
-        else:
-            text = trimmed + "…"
-
     return text
 
 
@@ -2910,12 +4248,354 @@ def rewrite_as_complete_message(profile_name, incoming_text, draft_reply):
 - 要有少少關心或者追問
 - 唔好太正經
 - 只輸出回覆本身
-""".strip()
+    """.strip()
     return generate_model_text(prompt, temperature=0.72, max_tokens=180)
 
 
+def log_outbound_error(conn, wa_id, error_type, error_detail):
+    conn.execute(
+        """
+        INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at)
+        VALUES (?, 'outbound', '', 'error', ?, ?, ?)
+        """,
+        (
+            wa_id,
+            error_type,
+            json.dumps({"error": str(error_detail)}, ensure_ascii=False),
+            utc_now(),
+        ),
+    )
+    conn.commit()
+
+
+def record_batch_side_effects(conn, wa_id, profile_name, combined_text, memory_text, image_categories):
+    if memory_text:
+        maybe_extract_memories(conn, wa_id, profile_name, memory_text)
+    if combined_text:
+        maybe_extract_session_memories(conn, wa_id, combined_text)
+        try:
+            remind_at, remind_content = parse_reminder(wa_id, combined_text)
+            if remind_at and remind_content:
+                save_reminder(conn, wa_id, remind_at, remind_content)
+        except Exception:
+            pass
+    if image_categories:
+        bump_image_stats(conn, wa_id, image_categories)
+    conn.commit()
+
+
+def generate_reply_with_fresh_conn(wa_id, profile_name, combined_text, image_inputs=None, image_categories=None):
+    local_conn = get_db()
+    try:
+        return generate_reply(
+            local_conn,
+            wa_id,
+            profile_name,
+            combined_text,
+            image_inputs=image_inputs,
+            image_categories=image_categories,
+        )
+    finally:
+        local_conn.close()
+
+
+def serialize_image_inputs_for_subprocess(image_inputs):
+    serialized = []
+    for item in image_inputs or []:
+        serialized.append(
+            {
+                "media_id": clean_text(item.get("media_id")),
+                "mime_type": clean_text(item.get("mime_type")),
+                "data_b64": clean_text(item.get("data_b64")),
+                "caption": clean_text(item.get("caption")),
+            }
+        )
+    return serialized
+
+
+def spawn_reply_generation_subprocess(wa_id, profile_name, combined_text, image_inputs=None, image_categories=None):
+    payload = {
+        "wa_id": wa_id,
+        "profile_name": profile_name,
+        "combined_text": combined_text,
+        "image_inputs": serialize_image_inputs_for_subprocess(image_inputs),
+        "image_categories": image_categories or [],
+    }
+    proc = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "--reply-job"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        cwd=str(Path(__file__).resolve().parent),
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    raw_payload = json.dumps(payload, ensure_ascii=False)
+    try:
+        if proc.stdin:
+            proc.stdin.write(raw_payload)
+            proc.stdin.close()
+    except Exception:
+        terminate_reply_generation_subprocess(proc)
+        raise
+    return proc
+
+
+def terminate_reply_generation_subprocess(proc):
+    if not proc or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=max(REPLY_JOB_TERMINATE_GRACE_SECONDS, 0.1))
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+
+
+def read_reply_generation_subprocess_result(proc):
+    stdout_text = ""
+    stderr_text = ""
+    try:
+        if proc.stdout:
+            stdout_text = proc.stdout.read()
+    except Exception:
+        stdout_text = ""
+    try:
+        if proc.stderr:
+            stderr_text = proc.stderr.read()
+    except Exception:
+        stderr_text = ""
+
+    if proc.returncode:
+        detail = clean_text(stderr_text or stdout_text) or f"reply_job_exit_{proc.returncode}"
+        raise RuntimeError(detail)
+
+    try:
+        payload = json.loads(stdout_text or "{}")
+    except Exception as exc:
+        raise RuntimeError(f"reply_job_invalid_json: {exc}") from exc
+
+    if not payload.get("ok"):
+        raise RuntimeError(clean_text(payload.get("error")) or "reply_job_failed")
+    return payload.get("reply_text", "")
+
+
+def run_reply_generation_job_from_stdio():
+    raw_input = sys.stdin.read()
+    payload = json.loads(raw_input or "{}")
+    reply_text = generate_reply_with_fresh_conn(
+        payload.get("wa_id", ""),
+        payload.get("profile_name", ""),
+        payload.get("combined_text", ""),
+        image_inputs=payload.get("image_inputs") or [],
+        image_categories=payload.get("image_categories") or [],
+    )
+    sys.stdout.write(json.dumps({"ok": True, "reply_text": reply_text}, ensure_ascii=False))
+    sys.stdout.flush()
+
+
+def process_pending_replies_for_contact(wa_id):
+    conn = get_db()
+    try:
+        while True:
+            target_version, profile_name, _ = get_reply_worker_snapshot(wa_id)
+            latest_inbound_id = get_latest_inbound_id(conn, wa_id)
+            if not latest_inbound_id:
+                if finish_reply_worker_if_idle(wa_id, target_version):
+                    return
+                continue
+
+            pending_rows = load_pending_inbound_batch(conn, wa_id, latest_inbound_id)
+            if not pending_rows:
+                if finish_reply_worker_if_idle(wa_id, target_version):
+                    return
+                continue
+
+            combined_text, memory_text = build_combined_user_input(pending_rows)
+            image_inputs = collect_image_inputs(pending_rows)
+            if not combined_text and not image_inputs:
+                if finish_reply_worker_if_idle(wa_id, target_version):
+                    return
+                continue
+
+            image_categories = classify_image_categories(combined_text, image_inputs)
+            batch_last_id = pending_rows[-1]["id"]
+            batch_last_message_id = clean_text(pending_rows[-1].get("message_id"))
+            last_body = clean_text(pending_rows[-1]["body"]) if pending_rows else (combined_text or "").strip()
+            typing_stop = None
+
+            if batch_last_message_id:
+                try:
+                    send_whatsapp_mark_as_read(batch_last_message_id)
+                except Exception:
+                    pass
+
+                typing_stop = threading.Event()
+
+                def _typing_still_relevant(expected_version, expected_batch_id):
+                    latest_version, _, _ = get_reply_worker_snapshot(wa_id)
+                    if latest_version != expected_version:
+                        return False
+                    return get_latest_inbound_id_for_wa(wa_id) == expected_batch_id
+
+                def _maintain_typing_indicator(expected_version, expected_batch_id, expected_message_id):
+                    if typing_stop.wait(TYPING_INDICATOR_DELAY_SECONDS):
+                        return
+                    refresh_seconds = max(TYPING_INDICATOR_REFRESH_SECONDS, 0.5)
+                    while not typing_stop.is_set():
+                        if not _typing_still_relevant(expected_version, expected_batch_id):
+                            return
+                        try:
+                            send_whatsapp_typing_indicator(expected_message_id)
+                        except Exception:
+                            pass
+                        if typing_stop.wait(refresh_seconds):
+                            return
+
+                threading.Thread(
+                    target=_maintain_typing_indicator,
+                    args=(target_version, batch_last_id, batch_last_message_id),
+                    daemon=True,
+                ).start()
+
+            reply_text = None
+            skip_generate = False
+            if wa_id == CLAUDE_WA_ID and not image_inputs:
+                latest_version, _, _ = get_reply_worker_snapshot(wa_id)
+                if latest_version != target_version or get_latest_inbound_id(conn, wa_id) != batch_last_id:
+                    if typing_stop:
+                        typing_stop.set()
+                    continue
+                run_claude_code_streaming(last_body, wa_id)
+                skip_generate = True
+            else:
+                reply_proc = None
+                try:
+                    reply_proc = spawn_reply_generation_subprocess(
+                        wa_id,
+                        profile_name,
+                        combined_text,
+                        image_inputs=image_inputs,
+                        image_categories=image_categories,
+                    )
+                except Exception as exc:
+                    reply_text = "我啱啱個腦有啲卡住咗，等我緩一緩先再同你傾，好唔好？"
+                    log_outbound_error(conn, wa_id, "model_failed", exc)
+                    if typing_stop:
+                        typing_stop.set()
+                    continue
+
+                superseded = False
+                while reply_proc.poll() is None:
+                    latest_version, latest_profile_name, _ = get_reply_worker_snapshot(wa_id)
+                    if latest_profile_name:
+                        profile_name = latest_profile_name
+                    if latest_version != target_version or get_latest_inbound_id_for_wa(wa_id) != batch_last_id:
+                        superseded = True
+                        break
+                    time.sleep(max(REPLY_JOB_POLL_SECONDS, 0.01))
+
+                if superseded:
+                    terminate_reply_generation_subprocess(reply_proc)
+                    if typing_stop:
+                        typing_stop.set()
+                    continue
+
+                try:
+                    reply_text = read_reply_generation_subprocess_result(reply_proc)
+                except Exception as exc:
+                    reply_text = "我啱啱個腦有啲卡住咗，等我緩一緩先再同你傾，好唔好？"
+                    log_outbound_error(conn, wa_id, "model_failed", exc)
+
+            if typing_stop:
+                typing_stop.set()
+
+            latest_version, latest_profile_name, _ = get_reply_worker_snapshot(wa_id)
+            if latest_profile_name:
+                profile_name = latest_profile_name
+            if latest_version != target_version or get_latest_inbound_id(conn, wa_id) != batch_last_id:
+                continue
+
+            if skip_generate:
+                record_batch_side_effects(conn, wa_id, profile_name, combined_text, memory_text, image_categories)
+                continue
+
+            if reply_text is None:
+                if finish_reply_worker_if_idle(wa_id, target_version):
+                    return
+                continue
+
+            try:
+                bubbles = split_reply_bubbles(reply_text, night_mode=is_night_mode())
+                bubbles = maybe_stage_followup_bubbles(bubbles, night_mode=is_night_mode())
+                reaction_emoji = pick_susu_reaction(combined_text or "", night_mode=is_night_mode())
+
+                latest_version, _, _ = get_reply_worker_snapshot(wa_id)
+                if latest_version != target_version or get_latest_inbound_id(conn, wa_id) != batch_last_id:
+                    continue
+
+                if reaction_emoji and batch_last_message_id:
+                    try:
+                        send_whatsapp_reaction(wa_id, batch_last_message_id, reaction_emoji)
+                    except Exception:
+                        pass
+
+                interrupted = False
+                for index, bubble in enumerate(bubbles):
+                    if index > 0:
+                        time.sleep(1.05)
+                    latest_version, _, _ = get_reply_worker_snapshot(wa_id)
+                    if latest_version != target_version or get_latest_inbound_id(conn, wa_id) != batch_last_id:
+                        interrupted = True
+                        break
+
+                    response = send_whatsapp_text(wa_id, bubble)
+                    conn.execute(
+                        """
+                        INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at)
+                        VALUES (?, 'outbound', ?, 'text', ?, ?, ?)
+                        """,
+                        (
+                            wa_id,
+                            (response.get("messages") or [{}])[0].get("id", ""),
+                            bubble,
+                            json.dumps(response, ensure_ascii=False),
+                            utc_now(),
+                        ),
+                    )
+                    conn.commit()
+
+                if interrupted:
+                    continue
+
+                record_batch_side_effects(conn, wa_id, profile_name, combined_text, memory_text, image_categories)
+            except Exception as exc:
+                log_outbound_error(conn, wa_id, "send_failed", exc)
+    finally:
+        conn.close()
+        with _reply_worker_states_lock:
+            state = _reply_worker_states.get(wa_id)
+            if state:
+                state["running"] = False
+
+
+def ensure_reply_worker_running(wa_id, profile_name=""):
+    should_start, _ = mark_reply_worker_dirty(wa_id, profile_name)
+    if should_start:
+        thread = threading.Thread(target=process_pending_replies_for_contact, args=(wa_id,), daemon=True)
+        thread.start()
+
+
 def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
-    if not (RELAY_API_KEY or GEMINI_API_KEY or MINIMAX_API_KEY or GROQ_API_KEY):
+    live_search_reply = build_live_search_reply(incoming_text, conn=conn, wa_id=wa_id)
+    if live_search_reply:
+        return live_search_reply
+
+    if not RELAY_API_KEY:
         return "我啱啱個腦有啲lag lag 地，等我緩一緩先再同你傾，好唔好？"
 
     now = hk_now()
@@ -3014,16 +4694,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             settings = get_runtime_settings()
-            relay_primary, relay_secondary = get_relay_model_order()
-            fallback_model = ""
-            if RELAY_API_KEY and relay_secondary:
-                fallback_model = relay_secondary
-            elif GEMINI_API_KEY:
-                fallback_model = settings["gemini_model"]
-            elif MINIMAX_API_KEY:
-                fallback_model = MINIMAX_MODEL
-            elif GROQ_API_KEY:
-                fallback_model = GROQ_MODEL
+            relay_primary, _ = get_relay_model_order()
 
             self._send_json(
                 {
@@ -3032,8 +4703,8 @@ class Handler(BaseHTTPRequestHandler):
                     "time_mode": "night" if is_night_mode() else "day",
                     "time_profile": get_time_profile(),
                     "timezone": "Asia/Hong_Kong",
-                    "primary_model": relay_primary if RELAY_API_KEY else (settings["gemini_model"] if GEMINI_API_KEY else (MINIMAX_MODEL if MINIMAX_API_KEY else GROQ_MODEL)),
-                    "fallback_model": fallback_model,
+                    "primary_model": relay_primary if RELAY_API_KEY else "",
+                    "fallback_model": "",
                     "has_relay_key": bool(RELAY_API_KEY),
                     "has_gemini_key": bool(GEMINI_API_KEY),
                     "has_minimax_key": bool(MINIMAX_API_KEY),
@@ -3083,6 +4754,8 @@ class Handler(BaseHTTPRequestHandler):
 
         conn = get_db()
         try:
+            dirty_contacts = {}
+            read_candidates = []
             for event in extract_text_messages(payload):
                 if has_processed_message(conn, event["message_id"]):
                     continue
@@ -3117,133 +4790,42 @@ class Handler(BaseHTTPRequestHandler):
                     """,
                     (event["wa_id"], event["profile_name"], utc_now()),
                 )
-                conn.commit()
-
-                if event["message_type"] not in ("text", "image"):
-                    continue
-
-                time.sleep(INBOUND_GRACE_SECONDS)
-
-                latest_inbound_id = get_latest_inbound_id(conn, event["wa_id"])
-                if latest_inbound_id != inbound_row_id:
-                    continue
-
-                pending_rows = load_pending_inbound_batch(conn, event["wa_id"], inbound_row_id)
-                if not pending_rows:
-                    continue
-
-                combined_text, memory_text = build_combined_user_input(pending_rows)
-                image_inputs = collect_image_inputs(pending_rows)
-                image_categories = classify_image_categories(combined_text, image_inputs)
-                if not combined_text and not image_inputs:
-                    continue
-
-                if memory_text:
-                    maybe_extract_memories(conn, event["wa_id"], event["profile_name"], memory_text)
-                if combined_text:
-                    maybe_extract_session_memories(conn, event["wa_id"], combined_text)
-                    # Check if message contains a reminder request
-                    try:
-                        _remind_at, _remind_content = parse_reminder(event["wa_id"], combined_text)
-                        if _remind_at and _remind_content:
-                            save_reminder(conn, event["wa_id"], _remind_at, _remind_content)
-                    except Exception:
-                        pass
-                if image_categories:
-                    bump_image_stats(conn, event["wa_id"], image_categories)
-                    conn.commit()
-
-                # ── Claude Code 模式（第二號碼專用）──────────────────────
-                reply_text = None
-                _skip_generate = False
-                last_body = clean_text(pending_rows[-1]["body"]) if pending_rows else (combined_text or "").strip()
-
-                if CLAUDE_WA_ID and event["wa_id"] == CLAUDE_WA_ID and not image_inputs:
-                    run_claude_code_streaming(last_body, event["wa_id"])
-                    _skip_generate = True
-
-                if not _skip_generate:
-                    try:
-                        reply_text = generate_reply(
-                            conn,
-                            event["wa_id"],
-                            event["profile_name"],
-                            combined_text,
-                            image_inputs=image_inputs,
-                            image_categories=image_categories,
-                        )
-                    except Exception as exc:
-                        reply_text = "我啱啱個腦有啲卡住咗，等我緩一緩先再同你傾，好唔好？"
-                        conn.execute(
-                            """
-                            INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at)
-                            VALUES (?, 'outbound', '', 'error', ?, ?, ?)
-                            """,
-                            (
-                                event["wa_id"],
-                                f"model_failed: {exc}",
-                                json.dumps({"error": str(exc)}, ensure_ascii=False),
-                                utc_now(),
-                            ),
-                        )
-                        conn.commit()
-
-                if reply_text is None:
-                    continue
-
-                try:
-                    bubbles = split_reply_bubbles(reply_text, night_mode=is_night_mode())
-                    bubbles = maybe_stage_followup_bubbles(bubbles, night_mode=is_night_mode())
-                    # reaction on incoming message
-                    reaction_emoji = pick_susu_reaction(combined_text or "", night_mode=is_night_mode())
-                    if reaction_emoji and event.get("message_id"):
-                        try:
-                            send_whatsapp_reaction(event["wa_id"], event["message_id"], reaction_emoji)
-                        except Exception:
-                            pass
-                    quote_id = _smart_quote_id if "_smart_quote_id" in vars() else ""
-                    for index, bubble in enumerate(bubbles):
-                        if index == 0 and quote_id:
-                            response = send_whatsapp_quote(event["wa_id"], bubble, quote_id)
-                        else:
-                            response = send_whatsapp_text(event["wa_id"], bubble)
-                        conn.execute(
-                            """
-                            INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at)
-                            VALUES (?, 'outbound', ?, 'text', ?, ?, ?)
-                            """,
-                            (
-                                event["wa_id"],
-                                (response.get("messages") or [{}])[0].get("id", ""),
-                                bubble,
-                                json.dumps(response, ensure_ascii=False),
-                                utc_now(),
-                            ),
-                        )
-                        conn.commit()
-                        if index < len(bubbles) - 1:
-                            time.sleep(1.05)
-                except Exception as exc:
-                    conn.execute(
-                        """
-                        INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at)
-                        VALUES (?, 'outbound', '', 'error', ?, ?, ?)
-                        """,
-                        (
-                            event["wa_id"],
-                            f"send_failed: {exc}",
-                            json.dumps({"error": str(exc)}, ensure_ascii=False),
-                            utc_now(),
-                        ),
-                    )
-                    conn.commit()
+                if event["message_type"] in ("text", "image"):
+                    dirty_contacts[event["wa_id"]] = event["profile_name"]
+                    if event["message_id"]:
+                        read_candidates.append(event["message_id"])
+            conn.commit()
         finally:
             conn.close()
+
+        for message_id in read_candidates:
+            try:
+                send_whatsapp_mark_as_read(message_id)
+            except Exception:
+                pass
+
+        for wa_id, profile_name in dirty_contacts.items():
+            ensure_reply_worker_running(wa_id, profile_name)
 
         self._send_json({"ok": True})
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--reply-job":
+        try:
+            run_reply_generation_job_from_stdio()
+            sys.exit(0)
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            try:
+                sys.stdout.write(json.dumps({"ok": False, "error": traceback.format_exc()}, ensure_ascii=False))
+                sys.stdout.flush()
+            except Exception:
+                pass
+            sys.exit(1)
+
+    bootstrap_conn = get_db()
+    bootstrap_conn.close()
     threading.Thread(target=proactive_loop, name="wa-proactive-loop", daemon=True).start()
     threading.Thread(target=reminder_loop, name="wa-reminder-loop", daemon=True).start()
     server = ThreadingHTTPServer((WA_HOST, WA_PORT), Handler)

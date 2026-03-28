@@ -93,6 +93,7 @@ python .\susu_admin_server.py
 - `susu-memory-admin.html`
 - `tools/hash_password.py`
 - `.env.example`
+- `PUBLIC_DEV_NOTES.md`
 
 ## License
 
