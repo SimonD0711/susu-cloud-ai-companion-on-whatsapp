@@ -2,9 +2,9 @@
 
 Susu Cloud: AI Companion on WhatsApp 是一个独立的开源仓库，包含：
 
-- `wa_agent.py`: WhatsApp webhook runtime，负责收消息、调模型、写入长期/短期/归档记忆和提醒
-- `susu_admin_server.py`: 轻量管理 API 和管理页面静态托管
-- `susu-memory-admin.html`: 记忆与提醒后台
+- `wa_agent.py`: WhatsApp webhook runtime，负责收消息、调模型、写入长期/短期/归档记忆和提醒，并从数据库读取运行时设置
+- `susu_admin_server.py`: 轻量管理 API，支持记忆、提醒和运行设置读写
+- `susu-memory-admin.html`: 记忆、提醒与运行设置后台
 
 
 ## Features
@@ -34,13 +34,13 @@ Susu Cloud: AI Companion on WhatsApp 是一个独立的开源仓库，包含：
   支持气泡拆分、夜间/白天语气差异、引用回复、消息 reaction 和后续补句，输出形态更接近真实 WhatsApp 对话节奏。
 
 - 独立后台管理
-  `susu_admin_server.py` 提供轻量管理 API，`susu-memory-admin.html` 提供联系人、长期记忆、短期记忆、归档记忆、提醒事项的查看、编辑、删除和创建能力。
+  `susu_admin_server.py` 提供轻量管理 API，`susu-memory-admin.html` 提供联系人、长期记忆、短期记忆、归档记忆、提醒事项的查看、编辑、删除和创建能力，也支持直接修改 `wa_susu_settings` 中的人设、Primary User Memory、模型路由和主动消息参数。
 
 - 独立部署，不依赖大型框架
   整个项目基于 Python 标准库 HTTP 服务和 SQLite，可直接作为轻量服务运行，适合先快速部署、再逐步演进。
 
 - 配置与隐私解耦
-  用户画像、管理员密码哈希、cookie secret、数据库路径、端口、模型 key 都通过 `.env` 注入，仓库本身不再携带个人资料或生产凭据。
+  用户画像、管理员密码哈希、cookie secret、数据库路径、端口、模型 key 都通过 `.env` 注入，仓库本身不再携带个人资料或生产凭据；运行中的核心设定则可通过后台写入数据库，避免反复改代码或重启服务。
 
 ## Quick Start
 

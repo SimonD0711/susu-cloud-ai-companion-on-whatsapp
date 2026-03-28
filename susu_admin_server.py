@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import difflib
 import hashlib
 import hmac
 import json
@@ -15,7 +16,25 @@ from env_utils import load_dotenv
 
 load_dotenv()
 
-from wa_agent import DB_PATH, get_db as get_wa_agent_db, utc_now
+from wa_agent import (
+    ADMIN_WA_ID,
+    DB_PATH,
+    GEMINI_MODEL,
+    PRIMARY_USER_MEMORY,
+    PROACTIVE_CONVERSATION_WINDOW_HOURS,
+    PROACTIVE_COOLDOWN_MINUTES,
+    PROACTIVE_ENABLED,
+    PROACTIVE_MAX_PER_SERVICE_DAY,
+    PROACTIVE_MIN_INBOUND_MESSAGES,
+    PROACTIVE_MIN_SILENCE_MINUTES,
+    PROACTIVE_REPLY_WINDOW_MINUTES,
+    PROACTIVE_SCAN_SECONDS,
+    RELAY_FALLBACK_MODEL,
+    RELAY_MODEL,
+    SYSTEM_PERSONA,
+    get_db as get_wa_agent_db,
+    utc_now,
+)
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -155,6 +174,230 @@ def current_session_bucket(observed_at, now_utc=None):
     if age <= timedelta(hours=SHORT_TERM_MEMORY_RETENTION_HOURS):
         return "within_7d"
     return ""
+
+
+def split_susu_memory_lines(value):
+    lines = []
+    for raw_line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = re.sub(r"^\s*[-*•]+\s*", "", raw_line).strip()
+        line = susu_clean_text(line)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def susu_memories_look_duplicated(left, right):
+    left_key = susu_normalize_key(left)
+    right_key = susu_normalize_key(right)
+    if not left_key or not right_key:
+        return False
+    if left_key == right_key:
+        return True
+    shorter, longer = (left_key, right_key) if len(left_key) <= len(right_key) else (right_key, left_key)
+    if len(shorter) >= 10 and shorter in longer:
+        return True
+    if len(shorter) >= 8 and difflib.SequenceMatcher(None, left_key, right_key).ratio() >= 0.78:
+        return True
+    return False
+
+
+def compact_primary_user_memory_text(value, max_lines=10, max_chars=1800):
+    kept = []
+    current_chars = 0
+    for line in split_susu_memory_lines(value):
+        if any(susu_memories_look_duplicated(line, existing) for existing in kept):
+            continue
+        next_chars = current_chars + len(line) + 2
+        if kept and next_chars > max_chars:
+            break
+        kept.append(line)
+        current_chars = next_chars
+        if len(kept) >= max_lines:
+            break
+    if not kept:
+        return normalize_susu_multiline(value)
+    return "\n".join(f"- {line}" for line in kept)
+
+
+SUSU_SETTINGS_TABLE = "wa_susu_settings"
+SUSU_SETTING_SPECS = {
+    "system_persona": {"type": "multiline", "max_length": 12000, "default": SYSTEM_PERSONA, "required": True},
+    "primary_user_memory": {"type": "multiline", "max_length": 12000, "default": PRIMARY_USER_MEMORY, "required": False},
+    "relay_model": {"type": "text", "max_length": 120, "default": RELAY_MODEL, "required": True},
+    "relay_fallback_model": {"type": "text", "max_length": 120, "default": RELAY_FALLBACK_MODEL, "required": False},
+    "gemini_model": {"type": "text", "max_length": 120, "default": GEMINI_MODEL, "required": True},
+    "proactive_enabled": {"type": "bool", "default": PROACTIVE_ENABLED},
+    "proactive_scan_seconds": {"type": "int", "default": PROACTIVE_SCAN_SECONDS, "min": 60, "max": 3600},
+    "proactive_min_silence_minutes": {"type": "int", "default": PROACTIVE_MIN_SILENCE_MINUTES, "min": 5, "max": 1440},
+    "proactive_cooldown_minutes": {"type": "int", "default": PROACTIVE_COOLDOWN_MINUTES, "min": 10, "max": 2880},
+    "proactive_reply_window_minutes": {"type": "int", "default": PROACTIVE_REPLY_WINDOW_MINUTES, "min": 10, "max": 1440},
+    "proactive_conversation_window_hours": {"type": "int", "default": PROACTIVE_CONVERSATION_WINDOW_HOURS, "min": 1, "max": 168},
+    "proactive_max_per_service_day": {"type": "int", "default": PROACTIVE_MAX_PER_SERVICE_DAY, "min": 0, "max": 20},
+    "proactive_min_inbound_messages": {"type": "int", "default": PROACTIVE_MIN_INBOUND_MESSAGES, "min": 1, "max": 200},
+}
+
+
+def normalize_susu_multiline(value, fallback=""):
+    text = str(fallback if value is None else value).replace("\r\n", "\n").replace("\r", "\n").strip()
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
+def normalize_susu_text(value, fallback=""):
+    return re.sub(r"\s+", " ", str(fallback if value is None else value).strip())
+
+
+def parse_susu_bool(value, default=False):
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def parse_susu_int(value, default=0, minimum=None, maximum=None):
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        parsed = int(default)
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+def coerce_susu_setting_value(key, raw_value):
+    spec = SUSU_SETTING_SPECS[key]
+    setting_type = spec["type"]
+    default = spec["default"]
+    if setting_type == "bool":
+        return parse_susu_bool(raw_value, default)
+    if setting_type == "int":
+        return parse_susu_int(raw_value, default, spec.get("min"), spec.get("max"))
+    if setting_type == "multiline":
+        text = normalize_susu_multiline(raw_value, default)[: spec.get("max_length", 12000)]
+        if key == "primary_user_memory":
+            return compact_primary_user_memory_text(text)[: spec.get("max_length", 12000)]
+        return text
+    return normalize_susu_text(raw_value, default)[: spec.get("max_length", 255)]
+
+
+def serialize_susu_setting_value(key, raw_value):
+    value = coerce_susu_setting_value(key, raw_value)
+    if SUSU_SETTING_SPECS[key]["type"] == "bool":
+        return "1" if value else "0"
+    return str(value)
+
+
+def ensure_susu_settings_table(conn):
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SUSU_SETTINGS_TABLE} (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    seeded_at = utc_now()
+    for key, spec in SUSU_SETTING_SPECS.items():
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {SUSU_SETTINGS_TABLE} (key, value, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (key, serialize_susu_setting_value(key, spec["default"]), seeded_at),
+        )
+
+
+def fetch_susu_settings_with_conn(conn):
+    ensure_susu_settings_table(conn)
+    conn.commit()
+    rows = conn.execute(f"SELECT key, value, updated_at FROM {SUSU_SETTINGS_TABLE}").fetchall()
+    row_map = {row["key"]: row for row in rows}
+    updated_at = ""
+    values = {}
+    for key, spec in SUSU_SETTING_SPECS.items():
+        row = row_map.get(key)
+        values[key] = coerce_susu_setting_value(key, row["value"] if row else spec["default"])
+        if row and row["updated_at"] and row["updated_at"] > updated_at:
+            updated_at = row["updated_at"]
+    return {"values": values, "updated_at": updated_at}
+
+
+def update_susu_settings(changes):
+    if not isinstance(changes, dict) or not changes:
+        return {"ok": False, "detail": "Missing settings"}
+    unsupported = [key for key in changes if key not in SUSU_SETTING_SPECS]
+    if unsupported:
+        return {"ok": False, "detail": f"Unsupported setting: {unsupported[0]}"}
+    now = utc_now()
+    conn = get_db()
+    try:
+        ensure_susu_settings_table(conn)
+        for key, raw_value in changes.items():
+            spec = SUSU_SETTING_SPECS[key]
+            value = coerce_susu_setting_value(key, raw_value)
+            if spec.get("required") and not str(value).strip():
+                return {"ok": False, "detail": f"Missing value for {key}"}
+            conn.execute(
+                f"""
+                INSERT INTO {SUSU_SETTINGS_TABLE} (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                  value = excluded.value,
+                  updated_at = excluded.updated_at
+                """,
+                (key, serialize_susu_setting_value(key, value), now),
+            )
+        conn.commit()
+        return {"ok": True, "updated_at": now}
+    finally:
+        conn.close()
+
+
+def dedupe_primary_long_term_memories(wa_id=""):
+    wa_id = susu_clean_text(wa_id or ADMIN_WA_ID)
+    if not wa_id:
+        return {"ok": False, "detail": "Missing wa_id"}
+    conn = get_db()
+    try:
+        settings = fetch_susu_settings_with_conn(conn)["values"]
+        primary_lines = split_susu_memory_lines(settings.get("primary_user_memory", ""))
+        if not primary_lines:
+            return {"ok": True, "wa_id": wa_id, "removed_count": 0, "removed_items": []}
+        rows = conn.execute(
+            """
+            SELECT id, content
+            FROM wa_memories
+            WHERE wa_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (wa_id,),
+        ).fetchall()
+        removed_ids = []
+        removed_items = []
+        seen = []
+        for row in rows:
+            content = susu_clean_text(row["content"])
+            if not content:
+                continue
+            if any(susu_memories_look_duplicated(content, item) for item in seen):
+                removed_ids.append(row["id"])
+                removed_items.append(content)
+                continue
+            if any(susu_memories_look_duplicated(content, primary_line) for primary_line in primary_lines):
+                removed_ids.append(row["id"])
+                removed_items.append(content)
+                continue
+            seen.append(content)
+        if removed_ids:
+            conn.executemany("DELETE FROM wa_memories WHERE id = ?", [(entry_id,) for entry_id in removed_ids])
+            conn.commit()
+        return {"ok": True, "wa_id": wa_id, "removed_count": len(removed_ids), "removed_items": removed_items[:20]}
+    finally:
+        conn.close()
 
 
 def wa_table_exists(conn, table_name):
@@ -354,6 +597,7 @@ def fetch_susu_memory(selected_wa_id=""):
             "db_path": str(DB_PATH),
             "selected_wa_id": selected_wa_id,
             "selected_contact": selected_contact,
+            "susu_settings": fetch_susu_settings_with_conn(conn),
             "contacts": contacts,
             "long_term_memories": memories,
             "session_memories": session_memories,
@@ -672,6 +916,24 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 result = create_susu_memory(wa_id, content, kind)
+            except Exception as exc:
+                result = {"ok": False, "detail": str(exc)}
+            self._send_json(result, 200 if result.get("ok") else 400)
+            return
+
+        if parsed.path == "/api/admin/susu-settings/update":
+            changes = data.get("settings")
+            try:
+                result = update_susu_settings(changes)
+            except Exception as exc:
+                result = {"ok": False, "detail": str(exc)}
+            self._send_json(result, 200 if result.get("ok") else 400)
+            return
+
+        if parsed.path == "/api/admin/susu-memory/deduplicate":
+            wa_id = str(data.get("wa_id", "")).strip()
+            try:
+                result = dedupe_primary_long_term_memories(wa_id)
             except Exception as exc:
                 result = {"ok": False, "detail": str(exc)}
             self._send_json(result, 200 if result.get("ok") else 400)

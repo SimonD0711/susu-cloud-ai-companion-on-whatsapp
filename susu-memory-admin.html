@@ -317,12 +317,73 @@
     }
     .login-err { color: var(--danger); font-size: 13px; margin-top: 8px; min-height: 18px; }
 
+    .settings-shell { padding: 22px; }
+    .settings-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+    .settings-top p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.8;
+      font-size: 14px;
+    }
+    .settings-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .settings-actions button {
+      min-height: 38px;
+      padding: 0 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 111, 178, 0.14);
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--accent);
+      cursor: pointer;
+    }
+    .settings-actions button.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: transparent;
+    }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .settings-card {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.54);
+      padding: 18px;
+    }
+    .settings-card.full { grid-column: 1 / -1; }
+    .settings-card h3 { margin: 0 0 8px; font-size: 18px; }
+    .settings-card p {
+      margin: 0 0 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+    .settings-helper {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
     .empty-state { text-align: center; color: var(--muted); padding: 40px 0; font-size: 15px; }
 
     @media (max-width: 700px) {
       .site-header { border-radius: 28px; flex-direction: column; align-items: flex-start; }
       .header-actions { justify-content: flex-start; }
       .summary-grid { grid-template-columns: 1fr 1fr; }
+      .settings-top { flex-direction: column; }
+      .settings-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -355,7 +416,7 @@
 
     <section class="panel">
       <h1>苏苏記憶管理</h1>
-      <p>直接管理目前 WhatsApp 版苏苏的真實資料庫：長期記憶 <code>wa_memories</code>、短期記憶 <code>wa_session_memories</code>、歸檔記憶 <code>wa_memory_archive</code>、以及提醒事項 <code>wa_reminders</code>。</p>
+      <p>直接管理目前 WhatsApp 版苏苏的真實資料庫：長期記憶 <code>wa_memories</code>、短期記憶 <code>wa_session_memories</code>、歸檔記憶 <code>wa_memory_archive</code>、提醒事項 <code>wa_reminders</code>，以及运行設定 <code>wa_susu_settings</code>。</p>
       <div class="status-note" id="status-note">正在讀取記憶資料...</div>
       <div class="summary-grid">
         <div class="summary-card">
@@ -399,6 +460,7 @@
         <button id="tab-session" type="button">短期記憶</button>
         <button id="tab-archive" type="button">歸檔記憶</button>
         <button id="tab-reminder" type="button">提醒事項</button>
+        <button id="tab-settings" type="button">苏苏設定</button>
       </div>
       <div class="section-meta" id="section-meta">長期記憶：由苏苏長期記住的內容</div>
     </div>
@@ -417,10 +479,6 @@
       <div class="modal-field">
         <label>聯絡人</label>
         <input type="text" id="edit-wa" readonly>
-      </div>
-      <div class="modal-field">
-        <label>類型</label>
-        <input type="text" id="edit-kind">
       </div>
       <div class="modal-field">
         <label>內容</label>
@@ -478,22 +536,14 @@
   <div class="modal" id="new-modal">
     <div class="modal-card">
       <h2>新增長期記憶</h2>
-      <p>為指定聯絡人新增一條可長期保留的記憶。</p>
+      <p>為指定聯絡人新增一條可長期保留的記憶，會以 <code>manual</code> 類型保存。</p>
       <div class="modal-field">
         <label>聯絡人</label>
         <select id="new-wa"></select>
       </div>
       <div class="modal-field">
-        <label>類型</label>
-        <select id="new-kind">
-          <option value="manual">manual</option>
-          <option value="note">note</option>
-          <option value="auto">auto</option>
-        </select>
-      </div>
-      <div class="modal-field">
         <label>內容</label>
-        <textarea id="new-content" spellcheck="false" placeholder="例如：Simon近期要完成 progress report"></textarea>
+        <textarea id="new-content" spellcheck="false" placeholder="例如：對方近期要完成 progress report"></textarea>
       </div>
       <div class="error-text" id="new-err"></div>
       <div class="modal-actions">
@@ -510,7 +560,52 @@
     session: { key: 'session_memories', label: '短期記憶', text: '短期記憶：24 小時 / 3 天 / 1 週內的時間分層記憶' },
     archive: { key: 'archived_memories', label: '歸檔記憶', text: '歸檔記憶：7 天後轉入，只在追問舊事時調取' },
     reminder: { key: 'reminders', label: '提醒事項', text: '提醒事項：等待觸發或已觸發的提醒' },
+    settings: { key: 'susu_settings', label: '苏苏設定', text: '苏苏設定：直接修改人設、核心檔案、模型路由與主動消息參數' },
   };
+  const SETTINGS_GROUPS = [
+    {
+      title: '人設與核心檔案',
+      desc: '這兩段會直接影響 system prompt 與長期背景理解。Primary User Memory 會在儲存時自動去重壓縮。',
+      className: 'full',
+      fields: [
+        { key: 'system_persona', label: 'System Persona', type: 'textarea', rows: 12, hint: '控制苏苏的身份、語氣、口吻與回覆邏輯。' },
+        { key: 'primary_user_memory', label: 'Primary User Memory（核心檔案）', type: 'textarea', rows: 10, hint: '只放穩定身份、長期習慣、固定偏好與邊界。未指定專屬聯絡人時可留空。' },
+      ],
+    },
+    {
+      title: '模型路由',
+      desc: '控制 Relay 主模型、夜間 fallback 模型，以及 Gemini 的後備模型名。',
+      fields: [
+        { key: 'relay_model', label: '主要 Relay 模型', type: 'text', hint: '日常時段優先使用的 Relay 模型。' },
+        { key: 'relay_fallback_model', label: '夜間 / fallback Relay 模型', type: 'text', hint: '夜間或主模型失敗時切換。' },
+        { key: 'gemini_model', label: 'Gemini 模型', type: 'text', hint: 'Relay 不可用時的 Gemini 後備模型。' },
+      ],
+    },
+    {
+      title: '主動消息參數',
+      desc: '控制主動消息掃描頻率、靜默時間、冷卻時間與每日上限。這些設定會在數秒內被 runtime 自動讀取。',
+      className: 'full',
+      fields: [
+        {
+          key: 'proactive_enabled',
+          label: '主動消息開關',
+          type: 'select',
+          options: [
+            { value: '1', label: '啟用' },
+            { value: '0', label: '停用' },
+          ],
+          hint: '停用後保留背景執行緒，但不再發送主動消息。',
+        },
+        { key: 'proactive_scan_seconds', label: '掃描間隔（秒）', type: 'number', min: 60, max: 3600, hint: '背景掃描週期。' },
+        { key: 'proactive_min_silence_minutes', label: '最短靜默（分鐘）', type: 'number', min: 5, max: 1440, hint: '距離上一則對話太近時，不主動打擾。' },
+        { key: 'proactive_cooldown_minutes', label: '主動冷卻（分鐘）', type: 'number', min: 10, max: 2880, hint: '發過主動消息後最少等多久再發。' },
+        { key: 'proactive_reply_window_minutes', label: '回覆判定窗（分鐘）', type: 'number', min: 10, max: 1440, hint: '主動消息發出後，在這段時間內收到回覆才算成功。' },
+        { key: 'proactive_conversation_window_hours', label: '會話窗口（小時）', type: 'number', min: 1, max: 168, hint: '太久沒聊天的聯絡人，不會被主動模式重開。' },
+        { key: 'proactive_max_per_service_day', label: '每日上限', type: 'number', min: 0, max: 20, hint: '按服務日計算，每天最多主動幾次。' },
+        { key: 'proactive_min_inbound_messages', label: '最少入站訊息數', type: 'number', min: 1, max: 200, hint: '互動太少的新聯絡人，不會過早主動。' },
+      ],
+    },
+  ];
   let payload = null;
   let activeTab = 'long';
   let searchText = '';
@@ -608,6 +703,7 @@
   });
 
   function currentItems() {
+    if (activeTab === 'settings') return [];
     return payload?.[TABS[activeTab].key] || [];
   }
 
@@ -616,6 +712,74 @@
     const term = searchText.trim().toLowerCase();
     if (!term) return items;
     return items.filter(item => JSON.stringify(item).toLowerCase().includes(term));
+  }
+
+  function settingValue(key, fallback = '') {
+    const value = payload?.susu_settings?.values?.[key];
+    return value ?? fallback;
+  }
+
+  function renderSettingsField(field) {
+    const fieldId = `setting-${field.key}`;
+    const value = settingValue(field.key, '');
+    if (field.type === 'textarea') {
+      return `
+<div class="modal-field">
+  <label for="${fieldId}">${esc(field.label)}</label>
+  <textarea id="${fieldId}" rows="${field.rows || 8}" spellcheck="false">${esc(value)}</textarea>
+  <div class="settings-helper">${esc(field.hint || '')}</div>
+</div>`;
+    }
+    if (field.type === 'select') {
+      const current = value ? '1' : '0';
+      return `
+<div class="modal-field">
+  <label for="${fieldId}">${esc(field.label)}</label>
+  <select id="${fieldId}">
+    ${field.options.map(option => `<option value="${esc(option.value)}"${option.value === current ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
+  </select>
+  <div class="settings-helper">${esc(field.hint || '')}</div>
+</div>`;
+    }
+    return `
+<div class="modal-field">
+  <label for="${fieldId}">${esc(field.label)}</label>
+  <input id="${fieldId}" type="${field.type === 'number' ? 'number' : 'text'}" value="${esc(value)}"${field.min != null ? ` min="${field.min}"` : ''}${field.max != null ? ` max="${field.max}"` : ''}>
+  <div class="settings-helper">${esc(field.hint || '')}</div>
+</div>`;
+  }
+
+  function renderSettingsView() {
+    const updatedAt = payload?.susu_settings?.updated_at ? fmt(payload.susu_settings.updated_at) : '—';
+    const selectedLabel = payload?.selected_contact?.display_name || payload?.selected_wa_id || '未選擇聯絡人';
+    return `
+<div class="entry-card settings-shell">
+  <div class="settings-top">
+    <div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="entry-key character">全局設定</span>
+        ${badgeHtml(`最後更新：${updatedAt}`)}
+        ${badgeHtml(`去重目標：${selectedLabel}`)}
+      </div>
+      <p>這裡修改的是 runtime 設定表 <code>wa_susu_settings</code>。儲存後數秒內會被 <code>wa_agent.py</code> 自動讀取，並且可對目前選中的聯絡人執行「核心檔案 vs 長期記憶」去重。</p>
+    </div>
+    <div class="settings-actions">
+      <button id="settings-dedupe-btn" type="button">清理當前聯絡人重複長期記憶</button>
+      <button id="settings-reset-btn" type="button">重新載入</button>
+      <button class="primary" id="settings-save-btn" type="button">儲存設定</button>
+    </div>
+  </div>
+  <div class="settings-grid">
+    ${SETTINGS_GROUPS.map(group => `
+      <section class="settings-card ${group.className || ''}">
+        <h3>${esc(group.title)}</h3>
+        <p>${esc(group.desc)}</p>
+        ${group.fields.map(renderSettingsField).join('')}
+      </section>
+    `).join('')}
+  </div>
+  <div class="error-text" id="settings-err"></div>
+</div>`;
   }
 
   function renderSummary() {
@@ -728,10 +892,32 @@
 </div>`;
   }
 
+  function refreshToolbarState() {
+    const isSettings = activeTab === 'settings';
+    searchInput.disabled = isSettings;
+    searchInput.placeholder = isSettings ? '苏苏設定分頁不支援搜尋' : '搜尋內容、類型、提醒文字...';
+  }
+
+  function bindSettingsActions() {
+    const dedupeBtn = document.getElementById('settings-dedupe-btn');
+    const reloadBtn = document.getElementById('settings-reset-btn');
+    const saveBtn = document.getElementById('settings-save-btn');
+    if (dedupeBtn) dedupeBtn.addEventListener('click', dedupePrimaryLongTermMemories);
+    if (reloadBtn) reloadBtn.addEventListener('click', () => loadMemory(contactSelect.value));
+    if (saveBtn) saveBtn.addEventListener('click', saveSettings);
+  }
+
   function renderEntries() {
+    refreshToolbarState();
+    document.getElementById('new-btn').hidden = activeTab !== 'long';
+    if (activeTab === 'settings') {
+      sectionMeta.textContent = TABS[activeTab].text;
+      entriesGrid.innerHTML = renderSettingsView();
+      bindSettingsActions();
+      return;
+    }
     const items = filteredItems();
     sectionMeta.textContent = `${TABS[activeTab].text} · ${items.length} 條`;
-    document.getElementById('new-btn').hidden = activeTab !== 'long';
     if (!items.length) {
       entriesGrid.innerHTML = `<div class="empty-state">這個分頁暫時沒有資料</div>`;
       return;
@@ -761,11 +947,66 @@
     }
   }
 
+  function collectSettingsForm() {
+    const settings = {};
+    SETTINGS_GROUPS.forEach(group => {
+      group.fields.forEach(field => {
+        const element = document.getElementById(`setting-${field.key}`);
+        if (!element) return;
+        if (field.type === 'select') {
+          settings[field.key] = element.value === '1';
+          return;
+        }
+        if (field.type === 'number') {
+          settings[field.key] = Number(element.value || 0);
+          return;
+        }
+        settings[field.key] = element.value;
+      });
+    });
+    return settings;
+  }
+
+  async function saveSettings() {
+    const err = document.getElementById('settings-err');
+    if (err) err.textContent = '';
+    try {
+      await apiFetch('/api/admin/susu-settings/update', {
+        method: 'POST',
+        body: JSON.stringify({ settings: collectSettingsForm() }),
+      });
+      await loadMemory(contactSelect.value);
+      statusNote.textContent = `苏苏設定已儲存，數秒內生效 · ${fmt(new Date().toISOString())}`;
+    } catch (e) {
+      if (err) err.textContent = e.message;
+    }
+  }
+
+  async function dedupePrimaryLongTermMemories() {
+    const err = document.getElementById('settings-err');
+    if (err) err.textContent = '';
+    const waId = payload?.selected_wa_id || '';
+    if (!waId) {
+      if (err) err.textContent = '請先選擇要清理的聯絡人';
+      return;
+    }
+    try {
+      const result = await apiFetch('/api/admin/susu-memory/deduplicate', {
+        method: 'POST',
+        body: JSON.stringify({ wa_id: waId }),
+      });
+      await loadMemory(waId);
+      statusNote.textContent = `重複長期記憶已清理：移除 ${result.removed_count || 0} 條 · ${fmt(new Date().toISOString())}`;
+    } catch (e) {
+      if (err) err.textContent = e.message;
+    }
+  }
+
   contactSelect.addEventListener('change', () => loadMemory(contactSelect.value));
   searchInput.addEventListener('input', () => { searchText = searchInput.value; renderEntries(); });
   document.getElementById('refresh-btn').addEventListener('click', () => loadMemory(contactSelect.value));
 
-  [['tab-long', 'long'], ['tab-session', 'session'], ['tab-archive', 'archive'], ['tab-reminder', 'reminder']].forEach(([id, tab]) => {
+  [['tab-long', 'long'], ['tab-session', 'session'], ['tab-archive', 'archive'], ['tab-reminder', 'reminder'], ['tab-settings', 'settings']].forEach(([id, tab]) => {
     document.getElementById(id).addEventListener('click', () => {
       activeTab = tab;
       document.querySelectorAll('.segmented button').forEach(btn => btn.classList.remove('active'));
@@ -777,7 +1018,6 @@
   const editModal = document.getElementById('edit-modal');
   const editId = document.getElementById('edit-id');
   const editWa = document.getElementById('edit-wa');
-  const editKind = document.getElementById('edit-kind');
   const editContent = document.getElementById('edit-content');
   const editErr = document.getElementById('edit-err');
 
@@ -786,7 +1026,6 @@
     if (!entry) return;
     editId.value = entry.id;
     editWa.value = entry.wa_id;
-    editKind.value = entry.kind || 'manual';
     editContent.value = entry.content || '';
     editErr.textContent = '';
     editModal.classList.add('is-open');
@@ -799,7 +1038,7 @@
     try {
       await apiFetch('/api/admin/susu-memory/update', {
         method: 'POST',
-        body: JSON.stringify({ id: Number(editId.value), kind: editKind.value.trim(), content: editContent.value }),
+        body: JSON.stringify({ id: Number(editId.value), content: editContent.value }),
       });
       editModal.classList.remove('is-open');
       await loadMemory(contactSelect.value);
@@ -882,7 +1121,6 @@
 
   const newModal = document.getElementById('new-modal');
   const newWa = document.getElementById('new-wa');
-  const newKind = document.getElementById('new-kind');
   const newContent = document.getElementById('new-content');
   const newErr = document.getElementById('new-err');
 
@@ -891,7 +1129,6 @@
     newWa.innerHTML = contacts.map(item =>
       `<option value="${esc(item.wa_id)}"${item.wa_id === payload?.selected_wa_id ? ' selected' : ''}>${esc(item.display_name)} · ${esc(item.wa_id)}</option>`
     ).join('');
-    newKind.value = 'manual';
     newContent.value = '';
     newErr.textContent = '';
     newModal.classList.add('is-open');
@@ -901,14 +1138,14 @@
   document.getElementById('new-cancel').addEventListener('click', () => newModal.classList.remove('is-open'));
   document.getElementById('new-save').addEventListener('click', async () => {
     newErr.textContent = '';
-    if (!newWa.value || !newKind.value.trim() || !newContent.value.trim()) {
-      newErr.textContent = '請填寫聯絡人、類型與內容';
+    if (!newWa.value || !newContent.value.trim()) {
+      newErr.textContent = '請填寫聯絡人與內容';
       return;
     }
     try {
       await apiFetch('/api/admin/susu-memory/create', {
         method: 'POST',
-        body: JSON.stringify({ wa_id: newWa.value, kind: newKind.value.trim(), content: newContent.value }),
+        body: JSON.stringify({ wa_id: newWa.value, content: newContent.value }),
       });
       newModal.classList.remove('is-open');
       await loadMemory(newWa.value);
