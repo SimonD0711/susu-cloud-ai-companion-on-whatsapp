@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>苏苏記憶管理 | Susu Cloud</title>
+  <meta name="robots" content="noindex,nofollow">
+  <style>
+    :root {
+      --text: #163447;
+      --muted: #5b7a8c;
+      --line: rgba(160, 201, 221, 0.42);
+      --glass: rgba(255, 255, 255, 0.76);
+      --shadow: 0 24px 60px rgba(76, 132, 156, 0.14);
+      --accent: #1f6fb2;
+      --accent-soft: #5cd6dd;
+      --danger: #d64b63;
+      --success: #116c4d;
+      --warn: #8a6c17;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "PingFang HK", "Noto Sans TC", "Microsoft JhengHei UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(92, 214, 221, 0.22), transparent 24%),
+        radial-gradient(circle at 82% 12%, rgba(124, 180, 255, 0.2), transparent 24%),
+        linear-gradient(180deg, #f5fdff 0%, #e7f4fb 100%);
+      min-height: 100vh;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    button, input, select, textarea { font: inherit; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
+
+    .site-header, .panel, .entry-card, .modal-card {
+      border: 1px solid var(--line);
+      background: var(--glass);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .site-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      border-radius: 999px;
+      margin-bottom: 24px;
+    }
+
+    .brand { display: inline-flex; align-items: center; gap: 14px; }
+    .brand-mark {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 48px; height: 48px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent-soft) 0%, #4a8df4 100%);
+      color: #fff;
+      font-weight: 700;
+      font-size: 18px;
+    }
+    .brand-copy { display: grid; gap: 2px; }
+    .brand-copy span { color: var(--muted); font-size: 14px; }
+
+    .header-actions {
+      display: flex; align-items: center; gap: 12px;
+      flex-wrap: wrap; justify-content: flex-end;
+    }
+    .header-link, .admin-button {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 38px; padding: 0 14px; border-radius: 999px;
+      border: 1px solid rgba(31, 111, 178, 0.14);
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--accent); cursor: pointer;
+      transition: transform 180ms ease;
+    }
+    .admin-button.danger { color: var(--danger); border-color: rgba(214, 75, 99, 0.18); }
+    .admin-button.logout { color: var(--danger); border-color: rgba(214, 75, 99, 0.18); }
+    .header-link:hover, .admin-button:hover { transform: translateY(-2px); }
+
+    .panel { padding: 24px; border-radius: 28px; margin-bottom: 22px; }
+    .panel h1 { margin: 0 0 6px; font-size: 36px; }
+    .panel p { margin: 0; color: var(--muted); line-height: 1.8; }
+    .status-note { margin-top: 12px; color: var(--muted); font-size: 14px; }
+
+    .toolbar {
+      display: flex; align-items: center; gap: 12px;
+      flex-wrap: wrap; margin-bottom: 18px;
+    }
+    .toolbar button {
+      display: inline-flex; align-items: center; gap: 6px;
+      min-height: 38px; padding: 0 16px; border-radius: 999px;
+      border: 1px solid rgba(31, 111, 178, 0.14);
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--accent); cursor: pointer;
+      transition: transform 180ms ease;
+    }
+    .toolbar button:hover { transform: translateY(-2px); }
+    .toolbar button.primary {
+      background: var(--accent); color: #fff;
+      border-color: transparent;
+    }
+    .toolbar select,
+    .toolbar input {
+      min-height: 38px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 111, 178, 0.14);
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--text);
+      padding: 0 14px;
+    }
+    .toolbar .grow {
+      flex: 1 1 240px;
+      min-width: 220px;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .summary-card {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.54);
+      padding: 14px 16px;
+    }
+    .summary-label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .summary-value {
+      font-size: 26px;
+      font-weight: 700;
+      line-height: 1.1;
+    }
+    .summary-sub {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      word-break: break-word;
+    }
+
+    .segment-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .segmented {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .segmented button {
+      min-height: 36px;
+      padding: 0 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 111, 178, 0.14);
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--accent);
+      cursor: pointer;
+    }
+    .segmented button.active {
+      background: var(--accent);
+      color: #fff;
+      border-color: transparent;
+    }
+    .section-meta {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .entries-grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .entry-card {
+      border-radius: 22px;
+      padding: 20px 22px;
+      position: relative;
+    }
+    .entry-header {
+      display: flex; align-items: flex-start;
+      justify-content: space-between; gap: 12px;
+      margin-bottom: 12px;
+    }
+    .entry-meta { display: flex; flex-direction: column; gap: 4px; }
+    .entry-key {
+      display: inline-flex; align-items: center;
+      padding: 2px 10px; border-radius: 999px;
+      font-size: 12px; font-weight: 700;
+      background: rgba(31, 111, 178, 0.1);
+      color: var(--accent);
+    }
+    .entry-key.character { background: rgba(92, 214, 221, 0.18); color: #1a6b70; }
+    .entry-key.memory { background: rgba(124, 180, 255, 0.2); color: #1a4a80; }
+    .entry-key.session { background: rgba(92, 214, 221, 0.18); color: #1a6b70; }
+    .entry-key.reminder { background: rgba(255, 211, 123, 0.22); color: var(--warn); }
+    .entry-user { font-size: 13px; color: var(--muted); }
+    .entry-time { font-size: 12px; color: var(--muted); }
+    .entry-tokens {
+      font-size: 12px; color: var(--muted);
+      background: rgba(91, 122, 140, 0.08); border-radius: 999px;
+      padding: 2px 8px;
+    }
+    .entry-tokens.active {
+      background: rgba(17, 108, 77, 0.12);
+      color: var(--success);
+    }
+    .entry-tokens.expired {
+      background: rgba(214, 75, 99, 0.12);
+      color: var(--danger);
+    }
+    .entry-actions { display: flex; gap: 8px; flex-shrink: 0; }
+    .entry-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 36px; height: 36px; border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.8);
+      cursor: pointer; transition: transform 150ms;
+      font-size: 16px;
+    }
+    .entry-btn:hover { transform: scale(1.08); }
+    .entry-btn.del { color: var(--danger); }
+    .entry-body {
+      font-size: 14px; line-height: 1.8;
+      white-space: pre-wrap;
+      color: var(--text);
+      background: rgba(245, 253, 255, 0.7);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 14px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    /* modal */
+    .modal {
+      position: fixed; inset: 0; display: none;
+      align-items: center; justify-content: center;
+      padding: 24px; background: rgba(18, 46, 62, 0.3);
+      z-index: 50;
+    }
+    .modal.is-open { display: flex; }
+    .modal-card {
+      width: min(600px, 100%); border-radius: 26px; padding: 26px;
+    }
+    .modal-card h2 { margin: 0 0 8px; font-size: 22px; }
+    .modal-card p { margin: 0 0 16px; color: var(--muted); line-height: 1.7; font-size: 14px; }
+    .modal-field { margin-bottom: 14px; }
+    .modal-field label {
+      display: block; font-size: 13px; font-weight: 600;
+      color: var(--muted); margin-bottom: 6px;
+    }
+    .modal-field input, .modal-field select {
+      width: 100%; min-height: 44px; border-radius: 14px;
+      border: 1px solid rgba(31, 111, 178, 0.16);
+      padding: 0 14px; background: rgba(255, 255, 255, 0.88);
+      color: var(--text);
+    }
+    .modal-field textarea {
+      width: 100%; min-height: 220px; border-radius: 14px;
+      border: 1px solid rgba(31, 111, 178, 0.16);
+      padding: 12px 14px; background: rgba(255, 255, 255, 0.88);
+      color: var(--text); resize: vertical; line-height: 1.7;
+    }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px; }
+    .modal-actions button {
+      min-height: 40px; padding: 0 18px; border-radius: 999px;
+      border: 1px solid var(--line); cursor: pointer;
+      background: rgba(255,255,255,0.72); color: var(--accent);
+      transition: transform 150ms;
+    }
+    .modal-actions button:hover { transform: translateY(-1px); }
+    .modal-actions button.primary {
+      background: var(--accent); color: #fff; border-color: transparent;
+    }
+    .modal-actions button.danger-btn {
+      background: var(--danger); color: #fff; border-color: transparent;
+    }
+    .error-text { min-height: 18px; color: var(--danger); font-size: 13px; margin-top: 6px; }
+
+    /* login overlay */
+    .login-overlay {
+      position: fixed; inset: 0; display: flex;
+      align-items: center; justify-content: center;
+      padding: 24px; background: rgba(18, 46, 62, 0.35);
+      z-index: 100;
+    }
+    .login-card {
+      width: min(360px, 100%); border-radius: 26px; padding: 28px;
+      border: 1px solid var(--line); background: var(--glass);
+      box-shadow: var(--shadow); backdrop-filter: blur(18px);
+    }
+    .login-card h2 { margin: 0 0 18px; font-size: 22px; }
+    .login-card input {
+      width: 100%; min-height: 44px; border-radius: 14px;
+      border: 1px solid rgba(31, 111, 178, 0.16);
+      padding: 0 14px; background: rgba(255,255,255,0.88);
+      margin-bottom: 12px;
+    }
+    .login-card button {
+      width: 100%; min-height: 44px; border-radius: 14px;
+      border: none; background: var(--accent); color: #fff;
+      cursor: pointer; font-size: 15px;
+    }
+    .login-err { color: var(--danger); font-size: 13px; margin-top: 8px; min-height: 18px; }
+
+    .empty-state { text-align: center; color: var(--muted); padding: 40px 0; font-size: 15px; }
+
+    @media (max-width: 700px) {
+      .site-header { border-radius: 28px; flex-direction: column; align-items: flex-start; }
+      .header-actions { justify-content: flex-start; }
+      .summary-grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Login overlay -->
+  <div class="login-overlay" id="login-overlay">
+    <div class="login-card">
+      <h2>站主登入</h2>
+      <p style="margin:0 0 14px;color:var(--muted);font-size:14px;line-height:1.7;">登入後即可管理目前 WhatsApp 版苏苏的真實記憶資料。</p>
+      <input type="password" id="login-pw" placeholder="輸入管理員密碼" autocomplete="current-password">
+      <div class="login-err" id="login-err"></div>
+      <button id="login-btn" type="button">登入</button>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <header class="site-header">
+      <a class="brand" href="/">
+        <span class="brand-mark">💭</span>
+        <span class="brand-copy">
+          <strong>Susu Cloud</strong>
+          <span>苏苏記憶管理</span>
+        </span>
+      </a>
+      <div class="header-actions">
+        <span id="admin-status" style="color:var(--muted);font-size:14px"></span>
+        <button class="admin-button logout" id="logout-btn" type="button" hidden>登出</button>
+      </div>
+    </header>
+
+    <section class="panel">
+      <h1>苏苏記憶管理</h1>
+      <p>直接管理目前 WhatsApp 版苏苏的真實資料庫：長期記憶 <code>wa_memories</code>、短期記憶 <code>wa_session_memories</code>、以及提醒事項 <code>wa_reminders</code>。</p>
+      <div class="status-note" id="status-note">正在讀取記憶資料...</div>
+      <div class="summary-grid">
+        <div class="summary-card">
+          <div class="summary-label">當前聯絡人</div>
+          <div class="summary-value" id="stat-contact">—</div>
+          <div class="summary-sub" id="stat-contact-sub">未選擇</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">長期記憶</div>
+          <div class="summary-value" id="stat-long">0</div>
+          <div class="summary-sub">可新增、編輯、刪除</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">短期記憶</div>
+          <div class="summary-value" id="stat-session">0</div>
+          <div class="summary-sub" id="stat-session-sub">0 條仍有效</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">提醒事項</div>
+          <div class="summary-value" id="stat-reminder">0</div>
+          <div class="summary-sub" id="stat-reminder-sub">0 條未觸發</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="toolbar">
+      <select id="contact-select"></select>
+      <input class="grow" id="search-input" type="search" placeholder="搜尋內容、類型、提醒文字...">
+      <button class="primary" id="new-btn" type="button">＋ 新增長期記憶</button>
+      <button id="refresh-btn" type="button">↻ 刷新</button>
+    </div>
+
+    <div class="segment-row">
+      <div class="segmented">
+        <button class="active" id="tab-long" type="button">長期記憶</button>
+        <button id="tab-session" type="button">短期記憶</button>
+        <button id="tab-reminder" type="button">提醒事項</button>
+      </div>
+      <div class="section-meta" id="section-meta">長期記憶：由苏苏長期記住的內容</div>
+    </div>
+
+    <div class="entries-grid" id="entries-grid">
+      <div class="empty-state" id="loading-msg">載入中...</div>
+    </div>
+  </div>
+
+  <!-- Edit modal -->
+  <div class="modal" id="edit-modal">
+    <div class="modal-card">
+      <h2 id="edit-modal-title">編輯長期記憶</h2>
+      <p id="edit-modal-desc">直接修改 <code>wa_memories</code> 的內容，儲存後即時生效。</p>
+      <input type="hidden" id="edit-id">
+      <div class="modal-field">
+        <label>聯絡人</label>
+        <input type="text" id="edit-wa" readonly>
+      </div>
+      <div class="modal-field">
+        <label>類型</label>
+        <input type="text" id="edit-kind">
+      </div>
+      <div class="modal-field">
+        <label>內容</label>
+        <textarea id="edit-content" spellcheck="false"></textarea>
+      </div>
+      <div class="error-text" id="edit-err"></div>
+      <div class="modal-actions">
+        <button id="edit-cancel" type="button">取消</button>
+        <button class="primary" id="edit-save" type="button">儲存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete modal -->
+  <div class="modal" id="delete-modal">
+    <div class="modal-card">
+      <h2>確認刪除</h2>
+      <p id="delete-desc">確定要刪除這條資料嗎？此操作無法撤銷。</p>
+      <input type="hidden" id="delete-id">
+      <input type="hidden" id="delete-type">
+      <div class="error-text" id="delete-err"></div>
+      <div class="modal-actions">
+        <button id="delete-cancel" type="button">取消</button>
+        <button class="danger-btn" id="delete-confirm" type="button">確認刪除</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="reminder-modal">
+    <div class="modal-card">
+      <h2>編輯提醒事項</h2>
+      <p>可直接修改提醒時間與內容，儲存後即時寫回 <code>wa_reminders</code>。</p>
+      <input type="hidden" id="reminder-id">
+      <div class="modal-field">
+        <label>聯絡人</label>
+        <input type="text" id="reminder-wa" readonly>
+      </div>
+      <div class="modal-field">
+        <label>提醒時間</label>
+        <input type="datetime-local" id="reminder-at">
+      </div>
+      <div class="modal-field">
+        <label>內容</label>
+        <textarea id="reminder-content" spellcheck="false"></textarea>
+      </div>
+      <div class="error-text" id="reminder-err"></div>
+      <div class="modal-actions">
+        <button id="reminder-cancel" type="button">取消</button>
+        <button class="primary" id="reminder-save" type="button">儲存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- New modal -->
+  <div class="modal" id="new-modal">
+    <div class="modal-card">
+      <h2>新增長期記憶</h2>
+      <p>為指定聯絡人新增一條可長期保留的記憶。</p>
+      <div class="modal-field">
+        <label>聯絡人</label>
+        <select id="new-wa"></select>
+      </div>
+      <div class="modal-field">
+        <label>類型</label>
+        <select id="new-kind">
+          <option value="manual">manual</option>
+          <option value="note">note</option>
+          <option value="auto">auto</option>
+        </select>
+      </div>
+      <div class="modal-field">
+        <label>內容</label>
+        <textarea id="new-content" spellcheck="false" placeholder="例如：Simon近期要完成 progress report"></textarea>
+      </div>
+      <div class="error-text" id="new-err"></div>
+      <div class="modal-actions">
+        <button id="new-cancel" type="button">取消</button>
+        <button class="primary" id="new-save" type="button">新增</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const API = '';
+  const TABS = {
+    long: { key: 'long_term_memories', label: '長期記憶', text: '長期記憶：由苏苏長期記住的內容' },
+    session: { key: 'session_memories', label: '短期記憶', text: '短期記憶：24 小時 / 3 天 / 1 週內的時間分層記憶' },
+    reminder: { key: 'reminders', label: '提醒事項', text: '提醒事項：等待觸發或已觸發的提醒' },
+  };
+  let payload = null;
+  let activeTab = 'long';
+  let searchText = '';
+
+  function esc(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function fmt(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString('zh-HK', {
+      hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit'
+    });
+  }
+
+  function toDateTimeLocalValue(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (v) => String(v).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  async function apiFetch(path, options = {}) {
+    const r = await fetch(API + path, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    return body;
+  }
+
+  const loginOverlay = document.getElementById('login-overlay');
+  const adminStatus = document.getElementById('admin-status');
+  const logoutBtn = document.getElementById('logout-btn');
+  const loginPw = document.getElementById('login-pw');
+  const loginBtn = document.getElementById('login-btn');
+  const loginErr = document.getElementById('login-err');
+  const statusNote = document.getElementById('status-note');
+  const entriesGrid = document.getElementById('entries-grid');
+  const contactSelect = document.getElementById('contact-select');
+  const searchInput = document.getElementById('search-input');
+  const sectionMeta = document.getElementById('section-meta');
+
+  async function checkAuth() {
+    try {
+      const s = await apiFetch('/api/admin/status');
+      if (!s.authenticated) {
+        loginOverlay.style.display = 'flex';
+        return;
+      }
+      loginOverlay.style.display = 'none';
+      adminStatus.textContent = s.display_name;
+      logoutBtn.hidden = false;
+      await loadMemory();
+    } catch (e) {
+      loginErr.textContent = e.message;
+      loginOverlay.style.display = 'flex';
+    }
+  }
+
+  loginBtn.addEventListener('click', async () => {
+    loginErr.textContent = '';
+    try {
+      const s = await apiFetch('/api/admin/login', {
+        method: 'POST',
+        body: JSON.stringify({ password: loginPw.value }),
+      });
+      if (s.authenticated) {
+        loginOverlay.style.display = 'none';
+        adminStatus.textContent = s.display_name;
+        logoutBtn.hidden = false;
+        loginPw.value = '';
+        await loadMemory();
+      }
+    } catch (e) {
+      loginErr.textContent = e.message;
+    }
+  });
+
+  loginPw.addEventListener('keydown', e => { if (e.key === 'Enter') loginBtn.click(); });
+  logoutBtn.addEventListener('click', async () => {
+    await apiFetch('/api/admin/logout', { method: 'POST' });
+    location.reload();
+  });
+
+  function currentItems() {
+    return payload?.[TABS[activeTab].key] || [];
+  }
+
+  function filteredItems() {
+    const items = currentItems();
+    const term = searchText.trim().toLowerCase();
+    if (!term) return items;
+    return items.filter(item => JSON.stringify(item).toLowerCase().includes(term));
+  }
+
+  function renderSummary() {
+    const c = payload?.selected_contact || null;
+    const stats = payload?.stats || {};
+    document.getElementById('stat-contact').textContent = c?.display_name || '—';
+    document.getElementById('stat-contact-sub').textContent = c ? c.wa_id : '未選擇';
+    document.getElementById('stat-long').textContent = String(stats.long_term_count || 0);
+    document.getElementById('stat-session').textContent = String(stats.session_count || 0);
+    document.getElementById('stat-session-sub').textContent = `${stats.active_session_count || 0} 條有效 · 24h ${stats.recent_24h_count || 0} / 3d ${stats.recent_3d_count || 0} / 1w ${stats.recent_7d_count || 0}`;
+    document.getElementById('stat-reminder').textContent = String(stats.reminder_count || 0);
+    document.getElementById('stat-reminder-sub').textContent = `${stats.pending_reminder_count || 0} 條未觸發`;
+  }
+
+  function renderContacts() {
+    const contacts = payload?.contacts || [];
+    if (!contacts.length) {
+      contactSelect.innerHTML = '<option value="">尚無聯絡人</option>';
+      return;
+    }
+    contactSelect.innerHTML = contacts.map(item =>
+      `<option value="${esc(item.wa_id)}"${item.wa_id === payload.selected_wa_id ? ' selected' : ''}>${esc(item.display_name)} · ${esc(item.wa_id)}</option>`
+    ).join('');
+  }
+
+  function badgeHtml(label, extraClass = '') {
+    return `<span class="entry-tokens ${extraClass}">${esc(label)}</span>`;
+  }
+
+  function renderEntry(item) {
+    if (activeTab === 'long') {
+      return `
+<div class="entry-card">
+  <div class="entry-header">
+    <div class="entry-meta">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="entry-key memory">${esc(item.kind || 'manual')}</span>
+        ${badgeHtml(`Key: ${item.memory_key || '—'}`)}
+      </div>
+      <span class="entry-user">${esc(item.wa_id)}</span>
+      <span class="entry-time">建立：${fmt(item.created_at)} ・ 更新：${fmt(item.updated_at)}</span>
+    </div>
+    <div class="entry-actions">
+      <button class="entry-btn edit-btn" title="編輯" data-id="${item.id}">✏️</button>
+      <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="memory" data-label="這條長期記憶">🗑️</button>
+    </div>
+  </div>
+  <div class="entry-body">${esc(item.content)}</div>
+</div>`;
+    }
+
+    if (activeTab === 'session') {
+      return `
+<div class="entry-card">
+  <div class="entry-header">
+    <div class="entry-meta">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="entry-key session">${esc(item.bucket_label || item.bucket || 'within_7d')}</span>
+        ${badgeHtml(item.is_expired ? '已過期' : '仍有效', item.is_expired ? 'expired' : 'active')}
+      </div>
+      <span class="entry-user">${esc(item.wa_id)}</span>
+      <span class="entry-time">時間碼：${fmt(item.observed_at || item.updated_at)} ・ 更新：${fmt(item.updated_at)} ・ 到期：${fmt(item.expires_at)}</span>
+    </div>
+    <div class="entry-actions">
+      <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="session" data-label="這條短期記憶">🗑️</button>
+    </div>
+  </div>
+  <div class="entry-body">${esc(item.content)}</div>
+</div>`;
+    }
+
+    return `
+<div class="entry-card">
+  <div class="entry-header">
+    <div class="entry-meta">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="entry-key reminder">${item.fired ? '已觸發' : '待觸發'}</span>
+      </div>
+      <span class="entry-user">${esc(item.wa_id)}</span>
+      <span class="entry-time">提醒：${fmt(item.remind_at)} ・ 建立：${fmt(item.created_at)}</span>
+    </div>
+    <div class="entry-actions">
+      <button class="entry-btn reminder-edit-btn" title="編輯" data-id="${item.id}">✏️</button>
+      <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="reminder" data-label="這條提醒事項">🗑️</button>
+    </div>
+  </div>
+  <div class="entry-body">${esc(item.content)}</div>
+</div>`;
+  }
+
+  function renderEntries() {
+    const items = filteredItems();
+    sectionMeta.textContent = `${TABS[activeTab].text} · ${items.length} 條`;
+    document.getElementById('new-btn').hidden = activeTab !== 'long';
+    if (!items.length) {
+      entriesGrid.innerHTML = `<div class="empty-state">這個分頁暫時沒有資料</div>`;
+      return;
+    }
+    entriesGrid.innerHTML = items.map(renderEntry).join('');
+    document.querySelectorAll('.edit-btn').forEach(btn =>
+      btn.addEventListener('click', () => openEdit(Number(btn.dataset.id))));
+    document.querySelectorAll('.delete-btn').forEach(btn =>
+      btn.addEventListener('click', () => openDelete(Number(btn.dataset.id), btn.dataset.type, btn.dataset.label)));
+    document.querySelectorAll('.reminder-edit-btn').forEach(btn =>
+      btn.addEventListener('click', () => openReminderEdit(Number(btn.dataset.id))));
+  }
+
+  async function loadMemory(waId = '') {
+    statusNote.textContent = '正在讀取目前 WhatsApp 版苏苏的資料...';
+    try {
+      const suffix = waId ? `?wa_id=${encodeURIComponent(waId)}` : '';
+      payload = await apiFetch(`/api/admin/susu-memory${suffix}`);
+      renderContacts();
+      renderSummary();
+      renderEntries();
+      statusNote.textContent = `資料更新於 ${fmt(payload.checked_at)}`;
+    } catch (e) {
+      payload = null;
+      entriesGrid.innerHTML = `<div class="empty-state">讀取失敗：${esc(e.message)}</div>`;
+      statusNote.textContent = `讀取失敗：${e.message}`;
+    }
+  }
+
+  contactSelect.addEventListener('change', () => loadMemory(contactSelect.value));
+  searchInput.addEventListener('input', () => { searchText = searchInput.value; renderEntries(); });
+  document.getElementById('refresh-btn').addEventListener('click', () => loadMemory(contactSelect.value));
+
+  [['tab-long', 'long'], ['tab-session', 'session'], ['tab-reminder', 'reminder']].forEach(([id, tab]) => {
+    document.getElementById(id).addEventListener('click', () => {
+      activeTab = tab;
+      document.querySelectorAll('.segmented button').forEach(btn => btn.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+      renderEntries();
+    });
+  });
+
+  const editModal = document.getElementById('edit-modal');
+  const editId = document.getElementById('edit-id');
+  const editWa = document.getElementById('edit-wa');
+  const editKind = document.getElementById('edit-kind');
+  const editContent = document.getElementById('edit-content');
+  const editErr = document.getElementById('edit-err');
+
+  function openEdit(id) {
+    const entry = (payload?.long_term_memories || []).find(item => item.id === id);
+    if (!entry) return;
+    editId.value = entry.id;
+    editWa.value = entry.wa_id;
+    editKind.value = entry.kind || 'manual';
+    editContent.value = entry.content || '';
+    editErr.textContent = '';
+    editModal.classList.add('is-open');
+    editContent.focus();
+  }
+
+  document.getElementById('edit-cancel').addEventListener('click', () => editModal.classList.remove('is-open'));
+  document.getElementById('edit-save').addEventListener('click', async () => {
+    editErr.textContent = '';
+    try {
+      await apiFetch('/api/admin/susu-memory/update', {
+        method: 'POST',
+        body: JSON.stringify({ id: Number(editId.value), kind: editKind.value.trim(), content: editContent.value }),
+      });
+      editModal.classList.remove('is-open');
+      await loadMemory(contactSelect.value);
+    } catch (e) {
+      editErr.textContent = e.message;
+    }
+  });
+
+  const deleteModal = document.getElementById('delete-modal');
+  const deleteId = document.getElementById('delete-id');
+  const deleteType = document.getElementById('delete-type');
+  const deleteErr = document.getElementById('delete-err');
+  const deleteDesc = document.getElementById('delete-desc');
+
+  function openDelete(id, type, label) {
+    deleteId.value = id;
+    deleteType.value = type;
+    deleteErr.textContent = '';
+    deleteDesc.textContent = `確定要刪除${label}嗎？此操作無法撤銷。`;
+    deleteModal.classList.add('is-open');
+  }
+
+  document.getElementById('delete-cancel').addEventListener('click', () => deleteModal.classList.remove('is-open'));
+  document.getElementById('delete-confirm').addEventListener('click', async () => {
+    deleteErr.textContent = '';
+    try {
+      await apiFetch('/api/admin/susu-memory/delete', {
+        method: 'POST',
+        body: JSON.stringify({ id: Number(deleteId.value), type: deleteType.value }),
+      });
+      deleteModal.classList.remove('is-open');
+      await loadMemory(contactSelect.value);
+    } catch (e) {
+      deleteErr.textContent = e.message;
+    }
+  });
+
+  const reminderModal = document.getElementById('reminder-modal');
+  const reminderId = document.getElementById('reminder-id');
+  const reminderWa = document.getElementById('reminder-wa');
+  const reminderAt = document.getElementById('reminder-at');
+  const reminderContent = document.getElementById('reminder-content');
+  const reminderErr = document.getElementById('reminder-err');
+
+  function openReminderEdit(id) {
+    const entry = (payload?.reminders || []).find(item => item.id === id);
+    if (!entry) return;
+    reminderId.value = entry.id;
+    reminderWa.value = entry.wa_id;
+    reminderAt.value = toDateTimeLocalValue(entry.remind_at);
+    reminderContent.value = entry.content || '';
+    reminderErr.textContent = '';
+    reminderModal.classList.add('is-open');
+    reminderAt.focus();
+  }
+
+  document.getElementById('reminder-cancel').addEventListener('click', () => reminderModal.classList.remove('is-open'));
+  document.getElementById('reminder-save').addEventListener('click', async () => {
+    reminderErr.textContent = '';
+    if (!reminderAt.value || !reminderContent.value.trim()) {
+      reminderErr.textContent = '請填寫提醒時間與內容';
+      return;
+    }
+    try {
+      await apiFetch('/api/admin/susu-memory/update', {
+        method: 'POST',
+        body: JSON.stringify({
+          id: Number(reminderId.value),
+          type: 'reminder',
+          remind_at: reminderAt.value,
+          content: reminderContent.value,
+        }),
+      });
+      reminderModal.classList.remove('is-open');
+      await loadMemory(contactSelect.value);
+    } catch (e) {
+      reminderErr.textContent = e.message;
+    }
+  });
+
+  const newModal = document.getElementById('new-modal');
+  const newWa = document.getElementById('new-wa');
+  const newKind = document.getElementById('new-kind');
+  const newContent = document.getElementById('new-content');
+  const newErr = document.getElementById('new-err');
+
+  document.getElementById('new-btn').addEventListener('click', () => {
+    const contacts = payload?.contacts || [];
+    newWa.innerHTML = contacts.map(item =>
+      `<option value="${esc(item.wa_id)}"${item.wa_id === payload?.selected_wa_id ? ' selected' : ''}>${esc(item.display_name)} · ${esc(item.wa_id)}</option>`
+    ).join('');
+    newKind.value = 'manual';
+    newContent.value = '';
+    newErr.textContent = '';
+    newModal.classList.add('is-open');
+    newContent.focus();
+  });
+
+  document.getElementById('new-cancel').addEventListener('click', () => newModal.classList.remove('is-open'));
+  document.getElementById('new-save').addEventListener('click', async () => {
+    newErr.textContent = '';
+    if (!newWa.value || !newKind.value.trim() || !newContent.value.trim()) {
+      newErr.textContent = '請填寫聯絡人、類型與內容';
+      return;
+    }
+    try {
+      await apiFetch('/api/admin/susu-memory/create', {
+        method: 'POST',
+        body: JSON.stringify({ wa_id: newWa.value, kind: newKind.value.trim(), content: newContent.value }),
+      });
+      newModal.classList.remove('is-open');
+      await loadMemory(newWa.value);
+    } catch (e) {
+      newErr.textContent = e.message;
+    }
+  });
+
+  [editModal, deleteModal, newModal, reminderModal].forEach(m => {
+    m.addEventListener('click', e => { if (e.target === m) m.classList.remove('is-open'); });
+  });
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape') [editModal, deleteModal, newModal, reminderModal].forEach(m => m.classList.remove('is-open'));
+  });
+
+  checkAuth();
+</script>
+</body>
+</html>
