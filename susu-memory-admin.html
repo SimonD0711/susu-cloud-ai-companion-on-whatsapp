@@ -426,11 +426,11 @@
 
     <section class="panel">
       <h1>苏苏記憶管理</h1>
-      <p>直接管理目前 WhatsApp 版苏苏的真實資料庫：長期記憶 <code>wa_memories</code>、短期記憶 <code>wa_session_memories</code>、歸檔記憶 <code>wa_memory_archive</code>、提醒事項 <code>wa_reminders</code>，以及苏苏自身設定 <code>wa_susu_settings</code>。</p>
+      <p>直接管理目前 WhatsApp 版苏苏主號的真實資料庫：長期記憶 <code>wa_memories</code>、短期記憶 <code>wa_session_memories</code>、歸檔記憶 <code>wa_memory_archive</code>、提醒事項 <code>wa_reminders</code>，以及苏苏自身設定 <code>wa_susu_settings</code>。</p>
       <div class="status-note" id="status-note">正在讀取記憶資料...</div>
       <div class="summary-grid">
         <div class="summary-card">
-          <div class="summary-label">當前聯絡人</div>
+          <div class="summary-label">主號</div>
           <div class="summary-value" id="stat-contact">—</div>
           <div class="summary-sub" id="stat-contact-sub">未選擇</div>
         </div>
@@ -578,7 +578,7 @@
 <script>
   const API = '';
   const TABS = {
-    long: { key: 'long_term_memories', label: '長期記憶', text: '長期記憶：由苏苏長期記住的內容' },
+    long: { key: 'long_term_memories', label: '長期記憶', text: '長期記憶：主號的補充長期記憶，應避免重複核心檔案' },
     session: { key: 'session_memories', label: '短期記憶', text: '短期記憶：24 小時 / 3 天 / 1 週內的時間分層記憶' },
     archive: { key: 'archived_memories', label: '歸檔記憶', text: '歸檔記憶：7 天後轉入，只在追問舊事時調取' },
     reminder: { key: 'reminders', label: '提醒事項', text: '提醒事項：等待觸發或已觸發的提醒' },
@@ -587,11 +587,11 @@
   const SETTINGS_GROUPS = [
     {
       title: '人設與核心記憶',
-      desc: '這兩段會直接影響苏苏的 system prompt 與對你的長期背景理解，儲存後之後的新回覆會按這份內容生成。',
+      desc: '這兩段會直接影響苏苏對主號的 system prompt 與長期背景理解。Primary User Memory 會在儲存時自動壓成較精簡的核心檔案。',
       className: 'full',
       fields: [
         { key: 'system_persona', label: 'System Persona', type: 'textarea', rows: 12, hint: '控制苏苏的身份、語氣、口吻和回覆風格。' },
-        { key: 'primary_user_memory', label: 'Primary User Memory', type: 'textarea', rows: 10, hint: '控制苏苏預設記得的你的核心背景、習慣和偏好。' },
+        { key: 'primary_user_memory', label: 'Primary User Memory（核心檔案）', type: 'textarea', rows: 10, hint: '只放穩定身份、長期習慣、固定偏好與邊界；儲存時會自動去重和精簡。' },
       ],
     },
     {
@@ -781,9 +781,10 @@
         <span class="entry-key character">全局設定</span>
         ${badgeHtml(`最後更新：${updatedAt}`)}
       </div>
-      <p>這裡改的是苏苏自身設定，不屬於任何單一聯絡人。儲存後會寫回 <code>wa_susu_settings</code>，大約 5 秒內由 <code>wa_agent.py</code> 自動讀到新值。</p>
+      <p>這裡改的是苏苏主號專用設定。儲存後會寫回 <code>wa_susu_settings</code>，大約 5 秒內由 <code>wa_agent.py</code> 自動讀到新值，並且長期記憶會自動避開和核心檔案重複的內容。</p>
     </div>
     <div class="settings-actions">
+      <button id="settings-dedupe-btn" type="button">清理主號重複長期記憶</button>
       <button id="settings-reset-btn" type="button">重新載入</button>
       <button class="primary" id="settings-save-btn" type="button">儲存設定</button>
     </div>
@@ -919,8 +920,12 @@
   }
 
   function bindSettingsActions() {
+    const dedupeBtn = document.getElementById('settings-dedupe-btn');
     const reloadBtn = document.getElementById('settings-reset-btn');
     const saveBtn = document.getElementById('settings-save-btn');
+    if (dedupeBtn) {
+      dedupeBtn.addEventListener('click', dedupePrimaryLongTermMemories);
+    }
     if (reloadBtn) {
       reloadBtn.addEventListener('click', () => loadMemory(contactSelect.value));
     }
@@ -999,6 +1004,21 @@
       });
       await loadMemory(contactSelect.value);
       statusNote.textContent = `苏苏設定已儲存，約 5 秒內生效 · ${fmt(new Date().toISOString())}`;
+    } catch (e) {
+      if (err) err.textContent = e.message;
+    }
+  }
+
+  async function dedupePrimaryLongTermMemories() {
+    const err = document.getElementById('settings-err');
+    if (err) err.textContent = '';
+    try {
+      const result = await apiFetch('/api/admin/susu-memory/deduplicate', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      await loadMemory(contactSelect.value);
+      statusNote.textContent = `主號重複長期記憶已清理：移除 ${result.removed_count || 0} 條 · ${fmt(new Date().toISOString())}`;
     } catch (e) {
       if (err) err.textContent = e.message;
     }

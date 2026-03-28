@@ -1,5 +1,6 @@
 ﻿#!/usr/bin/env python3
 import base64
+import difflib
 import hashlib
 import html
 import hmac
@@ -21,6 +22,7 @@ from urllib.request import Request, urlopen
 BASE_DIR = Path("/var/www/html")
 DB_PATH = BASE_DIR / "engagement.db"
 WA_AGENT_DB_PATH = BASE_DIR / "wa_agent.db"
+SUSU_PRIMARY_WA_ID = os.environ.get("WA_ADMIN_WA_ID", "85259576670")
 UNKNOWN_LOCATION = "\u672a\u77e5\u4f4d\u7f6e"
 ADMIN_NAME = "SimonD\uff08\u7ad9\u4e3b\uff09"
 ADMIN_PASSWORD_SALT_B64 = "rj+nNw193+XBQ8+IyFmlUQ=="
@@ -1198,6 +1200,49 @@ def current_session_bucket(observed_at, now_utc=None):
     return ""
 
 
+def split_susu_memory_lines(value):
+    lines = []
+    for raw_line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = re.sub(r"^\s*[-*•]+\s*", "", raw_line).strip()
+        line = susu_clean_text(line)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def susu_memories_look_duplicated(left, right):
+    left_key = susu_normalize_key(left)
+    right_key = susu_normalize_key(right)
+    if not left_key or not right_key:
+        return False
+    if left_key == right_key:
+        return True
+    shorter, longer = (left_key, right_key) if len(left_key) <= len(right_key) else (right_key, left_key)
+    if len(shorter) >= 10 and shorter in longer:
+        return True
+    if len(shorter) >= 8 and difflib.SequenceMatcher(None, left_key, right_key).ratio() >= 0.78:
+        return True
+    return False
+
+
+def compact_primary_user_memory_text(value, max_lines=10, max_chars=1800):
+    kept = []
+    current_chars = 0
+    for line in split_susu_memory_lines(value):
+        if any(susu_memories_look_duplicated(line, existing) for existing in kept):
+            continue
+        next_chars = current_chars + len(line) + 2
+        if kept and next_chars > max_chars:
+            break
+        kept.append(line)
+        current_chars = next_chars
+        if len(kept) >= max_lines:
+            break
+    if not kept:
+        return normalize_susu_multiline(value)
+    return "\n".join(f"- {line}" for line in kept)
+
+
 SUSU_SETTINGS_TABLE = "wa_susu_settings"
 SUSU_SETTING_SPECS = {
     "system_persona": {"type": "multiline", "max_length": 12000, "default": "", "required": True},
@@ -1255,7 +1300,10 @@ def coerce_susu_setting_value(key, raw_value):
     if setting_type == "int":
         return parse_susu_int(raw_value, default, spec.get("min"), spec.get("max"))
     if setting_type == "multiline":
-        return normalize_susu_multiline(raw_value, default)[: spec.get("max_length", 12000)]
+        text = normalize_susu_multiline(raw_value, default)[: spec.get("max_length", 12000)]
+        if key == "primary_user_memory":
+            return compact_primary_user_memory_text(text)[: spec.get("max_length", 12000)]
+        return text
     return normalize_susu_text(raw_value, default)[: spec.get("max_length", 255)]
 
 
@@ -1333,81 +1381,90 @@ def update_susu_settings(changes):
         conn.close()
 
 
+def dedupe_primary_long_term_memories():
+    conn = get_wa_agent_db()
+    try:
+        settings = fetch_susu_settings_with_conn(conn)["values"]
+        primary_lines = split_susu_memory_lines(settings.get("primary_user_memory", ""))
+        if not primary_lines:
+            return {"ok": True, "removed_count": 0, "removed_items": []}
+        rows = conn.execute(
+            """
+            SELECT id, content
+            FROM wa_memories
+            WHERE wa_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (SUSU_PRIMARY_WA_ID,),
+        ).fetchall()
+        removed_ids = []
+        removed_items = []
+        seen = []
+        for row in rows:
+            content = susu_clean_text(row["content"])
+            if not content:
+                continue
+            if any(susu_memories_look_duplicated(content, item) for item in seen):
+                removed_ids.append(row["id"])
+                removed_items.append(content)
+                continue
+            if any(susu_memories_look_duplicated(content, primary_line) for primary_line in primary_lines):
+                removed_ids.append(row["id"])
+                removed_items.append(content)
+                continue
+            seen.append(content)
+        if removed_ids:
+            conn.executemany("DELETE FROM wa_memories WHERE id = ?", [(entry_id,) for entry_id in removed_ids])
+            conn.commit()
+        return {"ok": True, "removed_count": len(removed_ids), "removed_items": removed_items[:20]}
+    finally:
+        conn.close()
+
+
 def fetch_susu_contacts(conn):
-    contacts = {}
-    order = []
     archive_enabled = wa_table_exists(conn, "wa_memory_archive")
-    for row in conn.execute(
+    row = conn.execute(
         """
         SELECT wa_id, profile_name, updated_at
         FROM wa_contacts
-        ORDER BY updated_at DESC, wa_id ASC
-        """
-    ).fetchall():
-        wa_id = row["wa_id"]
-        contacts[wa_id] = {
-            "wa_id": wa_id,
-            "profile_name": row["profile_name"] or "",
-            "updated_at": row["updated_at"] or "",
-        }
-        order.append(wa_id)
-
-    table_names = ["wa_memories", "wa_session_memories", "wa_reminders"]
+        WHERE wa_id = ?
+        LIMIT 1
+        """,
+        (SUSU_PRIMARY_WA_ID,),
+    ).fetchone()
+    profile_name = row["profile_name"] if row else ""
+    updated_at = row["updated_at"] if row else ""
+    archive_count = 0
     if archive_enabled:
-        table_names.append("wa_memory_archive")
-    for table_name in table_names:
-        rows = conn.execute(f"SELECT DISTINCT wa_id FROM {table_name} ORDER BY wa_id ASC").fetchall()
-        for row in rows:
-            wa_id = row["wa_id"]
-            if wa_id not in contacts:
-                contacts[wa_id] = {"wa_id": wa_id, "profile_name": "", "updated_at": ""}
-                order.append(wa_id)
-
-    ranked = []
-    seen = set()
-    for wa_id in order:
-        if wa_id in seen:
-            continue
-        seen.add(wa_id)
-        archive_count = 0
-        if archive_enabled:
-            archive_count = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS total FROM wa_memory_archive WHERE wa_id = ?",
-                    (wa_id,),
-                ).fetchone()["total"]
-            )
-        counts = conn.execute(
-            """
-            SELECT
-              (SELECT COUNT(*) FROM wa_memories WHERE wa_id = ?) AS memory_count,
-              (SELECT COUNT(*) FROM wa_session_memories WHERE wa_id = ?) AS session_count,
-              (SELECT COUNT(*) FROM wa_reminders WHERE wa_id = ?) AS reminder_count,
-              (SELECT COUNT(*) FROM wa_reminders WHERE wa_id = ? AND fired = 0) AS pending_reminder_count
-            """,
-            (wa_id, wa_id, wa_id, wa_id),
-        ).fetchone()
-        item = dict(contacts[wa_id])
-        item.update(
-            {
-                "display_name": item["profile_name"] or wa_id,
-                "memory_count": int(counts["memory_count"]),
-                "session_count": int(counts["session_count"]),
-                "archive_count": archive_count,
-                "reminder_count": int(counts["reminder_count"]),
-                "pending_reminder_count": int(counts["pending_reminder_count"]),
-            }
+        archive_count = int(
+            conn.execute(
+                "SELECT COUNT(*) AS total FROM wa_memory_archive WHERE wa_id = ?",
+                (SUSU_PRIMARY_WA_ID,),
+            ).fetchone()["total"]
         )
-        ranked.append(item)
-
-    ranked.sort(
-        key=lambda item: (
-            item["wa_id"] != "85259576670",
-            -(item["memory_count"] + item["session_count"] + item["archive_count"] + item["reminder_count"]),
-            item["wa_id"],
-        )
-    )
-    return ranked
+    counts = conn.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM wa_memories WHERE wa_id = ?) AS memory_count,
+          (SELECT COUNT(*) FROM wa_session_memories WHERE wa_id = ?) AS session_count,
+          (SELECT COUNT(*) FROM wa_reminders WHERE wa_id = ?) AS reminder_count,
+          (SELECT COUNT(*) FROM wa_reminders WHERE wa_id = ? AND fired = 0) AS pending_reminder_count
+        """,
+        (SUSU_PRIMARY_WA_ID, SUSU_PRIMARY_WA_ID, SUSU_PRIMARY_WA_ID, SUSU_PRIMARY_WA_ID),
+    ).fetchone()
+    return [
+        {
+            "wa_id": SUSU_PRIMARY_WA_ID,
+            "profile_name": profile_name,
+            "updated_at": updated_at,
+            "display_name": profile_name or SUSU_PRIMARY_WA_ID,
+            "memory_count": int(counts["memory_count"]),
+            "session_count": int(counts["session_count"]),
+            "archive_count": archive_count,
+            "reminder_count": int(counts["reminder_count"]),
+            "pending_reminder_count": int(counts["pending_reminder_count"]),
+        }
+    ]
 
 
 def fetch_susu_memory(selected_wa_id=""):
@@ -1415,14 +1472,7 @@ def fetch_susu_memory(selected_wa_id=""):
     try:
         archive_enabled = wa_table_exists(conn, "wa_memory_archive")
         contacts = fetch_susu_contacts(conn)
-        wa_ids = {item["wa_id"] for item in contacts}
-        if selected_wa_id not in wa_ids:
-            if "85259576670" in wa_ids:
-                selected_wa_id = "85259576670"
-            elif contacts:
-                selected_wa_id = contacts[0]["wa_id"]
-            else:
-                selected_wa_id = ""
+        selected_wa_id = SUSU_PRIMARY_WA_ID
 
         memories = []
         session_memories = []
@@ -1549,7 +1599,7 @@ def fetch_susu_memory(selected_wa_id=""):
 
 
 def create_susu_memory(wa_id, content, kind="manual"):
-    wa_id = susu_clean_text(wa_id)
+    wa_id = SUSU_PRIMARY_WA_ID
     content = susu_clean_text(content)
     kind = susu_clean_text(kind)[:40] or "manual"
     if not wa_id or not content:
@@ -2292,9 +2342,9 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 kind = str(data.get("kind", data.get("key", "manual"))).strip()
                 content = str(data.get("content", data.get("value", ""))).strip()
-                wa_id = str(data.get("wa_id", data.get("userId", ""))).strip()
-                if not kind or not content or not wa_id:
-                    self._send_json({"error": "Missing kind, content or wa_id"}, 400)
+                wa_id = SUSU_PRIMARY_WA_ID
+                if not kind or not content:
+                    self._send_json({"error": "Missing kind or content"}, 400)
                     return
                 try:
                     result = create_susu_memory(wa_id, content, kind)
@@ -2313,6 +2363,18 @@ class Handler(BaseHTTPRequestHandler):
                     result = update_susu_settings(changes)
                     changed_keys = sorted(changes.keys()) if isinstance(changes, dict) else []
                     log_admin_action(conn, "susu_settings_update", "ok" if result.get("ok") else "error", json.dumps(changed_keys, ensure_ascii=False))
+                except Exception as exc:
+                    result = {"ok": False, "detail": str(exc)}
+                self._send_json(result, 200 if result.get("ok") else 400)
+                return
+
+            if parsed.path == "/api/admin/susu-memory/deduplicate":
+                if not viewer_is_admin:
+                    self._send_json({"error": "Forbidden"}, 403)
+                    return
+                try:
+                    result = dedupe_primary_long_term_memories()
+                    log_admin_action(conn, "susu_memory_deduplicate", "ok" if result.get("ok") else "error", f"{SUSU_PRIMARY_WA_ID}:{result.get('removed_count', 0)}")
                 except Exception as exc:
                     result = {"ok": False, "detail": str(exc)}
                 self._send_json(result, 200 if result.get("ok") else 400)

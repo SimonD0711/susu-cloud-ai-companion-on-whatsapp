@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import difflib
 import subprocess
 import shlex
 import json
@@ -419,6 +420,76 @@ def normalize_key(value):
     value = clean_text(value).lower()
     value = re.sub(r"[^\w\u4e00-\u9fff]+", "", value)
     return value[:160]
+
+
+def split_profile_memory_lines(value):
+    lines = []
+    for raw_line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = re.sub(r"^\s*[-*•]+\s*", "", raw_line).strip()
+        line = clean_text(line)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def memories_look_duplicated(left, right):
+    left_key = normalize_key(left)
+    right_key = normalize_key(right)
+    if not left_key or not right_key:
+        return False
+    if left_key == right_key:
+        return True
+    shorter, longer = (left_key, right_key) if len(left_key) <= len(right_key) else (right_key, left_key)
+    if len(shorter) >= 10 and shorter in longer:
+        return True
+    if len(shorter) >= 8 and difflib.SequenceMatcher(None, left_key, right_key).ratio() >= 0.78:
+        return True
+    return False
+
+
+def build_core_profile_memory_text(primary_text, max_lines=10, max_chars=1800):
+    kept = []
+    current_chars = 0
+    for line in split_profile_memory_lines(primary_text):
+        if any(memories_look_duplicated(line, existing) for existing in kept):
+            continue
+        next_chars = current_chars + len(line) + 2
+        if kept and next_chars > max_chars:
+            break
+        kept.append(line)
+        current_chars = next_chars
+        if len(kept) >= max_lines:
+            break
+    if not kept:
+        fallback = normalize_runtime_multiline(primary_text)
+        return fallback or "（暫時未有核心檔案）"
+    return "\n".join(f"- {line}" for line in kept)
+
+
+def build_filtered_long_term_memory_lines(rows, primary_text, limit=20):
+    primary_lines = split_profile_memory_lines(primary_text)
+    kept = []
+    seen_texts = []
+    for row in rows:
+        content = clean_text(row.get("content"))
+        if not content:
+            continue
+        if any(memories_look_duplicated(content, primary_line) for primary_line in primary_lines):
+            continue
+        if any(memories_look_duplicated(content, existing) for existing in seen_texts):
+            continue
+        kept.append(f"- {content}")
+        seen_texts.append(content)
+        if len(kept) >= limit:
+            break
+    return kept
+
+
+def primary_profile_memory_for_wa(wa_id, settings=None):
+    settings = settings or get_runtime_settings()
+    if (wa_id or "").strip() != ADMIN_WA_ID:
+        return ""
+    return settings.get("primary_user_memory", "")
 
 
 def ensure_column(conn, table_name, column_name, ddl):
@@ -2051,6 +2122,7 @@ def proactive_slot_hint(now=None):
 def build_proactive_prompt(conn, wa_id, profile_name, now=None):
     now = now or hk_now()
     settings = get_runtime_settings()
+    primary_text = primary_profile_memory_for_wa(wa_id, settings)
     history_lines = []
     for item in load_recent_messages(conn, wa_id, limit=8):
         speaker = "對方" if item["direction"] == "inbound" else "蘇蘇"
@@ -2058,17 +2130,14 @@ def build_proactive_prompt(conn, wa_id, profile_name, now=None):
         if body:
             history_lines.append(f"{speaker}: {body}")
 
-    dynamic_memories = [
-        f"- {clean_text(item.get('content'))}"
-        for item in load_memories(conn, wa_id)
-        if clean_text(item.get("content"))
-    ]
+    dynamic_memories = build_filtered_long_term_memory_lines(load_memories(conn, wa_id), primary_text, limit=20)
     within_24h_memories = format_session_memory_lines(conn, wa_id, "within_24h", limit=4)
     within_3d_memories = format_session_memory_lines(conn, wa_id, "within_3d", limit=4)
     within_7d_memories = format_session_memory_lines(conn, wa_id, "within_7d", limit=4)
     image_stats_text = load_image_stats_summary(conn, wa_id)
 
     history_text = "\n".join(history_lines[-8:]) if history_lines else "（最近未有聊天）"
+    core_profile_text = build_core_profile_memory_text(primary_text) if primary_text else "（主號核心檔案暫未設定）"
     memory_text = "\n".join(dynamic_memories) if dynamic_memories else "（暫時未有補充長期記憶）"
     within_24h_text = "\n".join(within_24h_memories) if within_24h_memories else "（暫時未有 24 小時內記憶）"
     within_3d_text = "\n".join(within_3d_memories) if within_3d_memories else "（暫時未有三天內記憶）"
@@ -2081,10 +2150,10 @@ def build_proactive_prompt(conn, wa_id, profile_name, now=None):
     return f"""
 對方 WhatsApp 顯示名稱：{profile_name or "對方"}
 
-長期生活習慣：
-{settings["primary_user_memory"]}
+主號核心檔案：
+{core_profile_text}
 
-長期補充記憶：
+補充長期記憶（已避開與核心檔案重複項）：
 {memory_text}
 
 24 小時內記憶：
@@ -2627,6 +2696,7 @@ def reminder_loop():
 
 def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
     settings = get_runtime_settings()
+    primary_text = primary_profile_memory_for_wa(wa_id, settings)
     lookup_archive = should_lookup_archive(incoming_text)
     history_lines = []
     quotable = []  # [(message_id, preview)]
@@ -2647,11 +2717,7 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
         if item["direction"] == "inbound" and msg_id and len(body) > 3:
             quotable.append((msg_id, body[:40]))
 
-    dynamic_memories = [
-        f"- {clean_text(item.get('content'))}"
-        for item in load_memories(conn, wa_id)
-        if clean_text(item.get("content"))
-    ]
+    dynamic_memories = build_filtered_long_term_memory_lines(load_memories(conn, wa_id), primary_text, limit=20)
     within_24h_memories = format_session_memory_lines(conn, wa_id, "within_24h", limit=6)
     within_3d_memories = format_session_memory_lines(conn, wa_id, "within_3d", limit=6)
     within_7d_memories = format_session_memory_lines(conn, wa_id, "within_7d", limit=6)
@@ -2662,7 +2728,7 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
             limit=4,
         )
     history_text = "\n".join(history_lines[-12:]) if history_lines else "（暂时未有最近聊天）"
-    habit_text = settings["primary_user_memory"]
+    habit_text = build_core_profile_memory_text(primary_text) if primary_text else "（主號核心檔案暫未設定）"
     memory_text = "\n".join(dynamic_memories) if dynamic_memories else "（暂时未有补充长期记忆）"
     within_24h_text = "\n".join(within_24h_memories) if within_24h_memories else "（暂时未有 24 小时内记忆）"
     within_3d_text = "\n".join(within_3d_memories) if within_3d_memories else "（暂时未有三天内记忆）"
@@ -2707,10 +2773,10 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
     return f"""
 对方 WhatsApp 显示名称：{profile_name or "对方"}
 
-長期生活習慣：
+主號核心檔案：
 {habit_text}
 
-長期補充記憶：
+補充長期記憶（已避開與核心檔案重複項）：
 {memory_text}
 
 24 小時內記憶：
