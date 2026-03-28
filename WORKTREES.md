@@ -16,6 +16,7 @@
   path: `C:\Users\ding7\Documents\gpt-openclaw-workspace`
   purpose: OpenClaw workspace files and Tokyo/WSL scripts
 
+Archived branch note:
 - `codex/local-wa-proxy`
-  path: `C:\Users\ding7\Documents\gpt-local-wa-proxy`
-  purpose: local WhatsApp proxy, Gemini guest pages, and WA tooling
+  no active worktree
+  deployment files merged into `codex/susu-cloud`; branch retained only as history snapshot
