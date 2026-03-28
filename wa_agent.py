@@ -3893,21 +3893,11 @@ def shorten_whatsapp_reply(reply, night_mode=False):
         return text
 
     max_sentences = 3 if night_mode else 2
-    max_len = 120 if night_mode else 72
-    min_cut = 45 if night_mode else 30
 
     sentences = re.split(r"(?<=[。！？!?~～…])\s*", text)
     sentences = [s.strip() for s in sentences if s.strip()]
     if len(sentences) > max_sentences:
         text = " ".join(sentences[:max_sentences]).strip()
-
-    if len(text) > max_len:
-        trimmed = text[:max_len].rstrip()
-        cut = max(trimmed.rfind(mark) for mark in ["。", "！", "？", "!", "?", "~", "～", "…", " "])
-        if cut > min_cut:
-            text = trimmed[: cut + 1].strip()
-        else:
-            text = trimmed + "…"
 
     return text
 
