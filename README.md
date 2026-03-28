@@ -6,7 +6,6 @@ Susu Cloud 是一个独立的开源仓库，包含：
 - `susu_admin_server.py`: 轻量管理 API 和管理页面静态托管
 - `susu-memory-admin.html`: 记忆与提醒后台
 
-这个仓库已经和摄影站代码解耦，不包含摄影页面、图片素材或站点专用配置。
 
 ## Features
 
