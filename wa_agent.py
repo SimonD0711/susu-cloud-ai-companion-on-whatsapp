@@ -3975,12 +3975,26 @@ def generate_reply_with_fresh_conn(wa_id, profile_name, combined_text, image_inp
         local_conn.close()
 
 
+def serialize_image_inputs_for_subprocess(image_inputs):
+    serialized = []
+    for item in image_inputs or []:
+        serialized.append(
+            {
+                "media_id": clean_text(item.get("media_id")),
+                "mime_type": clean_text(item.get("mime_type")),
+                "data_b64": clean_text(item.get("data_b64")),
+                "caption": clean_text(item.get("caption")),
+            }
+        )
+    return serialized
+
+
 def spawn_reply_generation_subprocess(wa_id, profile_name, combined_text, image_inputs=None, image_categories=None):
     payload = {
         "wa_id": wa_id,
         "profile_name": profile_name,
         "combined_text": combined_text,
-        "image_inputs": image_inputs or [],
+        "image_inputs": serialize_image_inputs_for_subprocess(image_inputs),
         "image_categories": image_categories or [],
     }
     proc = subprocess.Popen(
