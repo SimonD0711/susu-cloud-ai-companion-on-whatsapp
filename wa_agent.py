@@ -2060,22 +2060,48 @@ def download_graph_media(url):
     return payload, mime_type
 
 
-def fetch_whatsapp_image(media_id):
+def fetch_whatsapp_image(media_id, timeout=20):
+    """Fetch WhatsApp image with overall timeout protection.
+
+    WhatsApp may send image+text as separate webhooks (image first, text second).
+    To avoid blocking the reply worker for too long when the image download is slow,
+    we enforce an overall timeout on the entire fetch operation.
+    """
     if not media_id or not ACCESS_TOKEN:
         return None
-    metadata = graph_get_json(media_id)
-    media_url = metadata.get("url")
-    mime_type = metadata.get("mime_type", "")
-    if not media_url or not mime_type.startswith("image/"):
+
+    result = {"data": None, "error": None}
+    fetched = threading.Event()
+
+    def _fetch():
+        try:
+            metadata = graph_get_json(media_id)
+            media_url = metadata.get("url")
+            mime_type = metadata.get("mime_type", "")
+            if not media_url or not mime_type.startswith("image/"):
+                result["data"] = None
+                fetched.set()
+                return
+            blob, header_mime = download_graph_media(media_url)
+            final_mime = mime_type or header_mime or "image/jpeg"
+            result["data"] = {
+                "media_id": media_id,
+                "mime_type": final_mime,
+                "bytes": blob,
+                "data_b64": base64.b64encode(blob).decode("ascii"),
+            }
+        except Exception as e:
+            result["error"] = e
+        finally:
+            fetched.set()
+
+    t = threading.Thread(target=_fetch, daemon=True)
+    t.start()
+    if not fetched.wait(timeout=timeout):
         return None
-    blob, header_mime = download_graph_media(media_url)
-    final_mime = mime_type or header_mime or "image/jpeg"
-    return {
-        "media_id": media_id,
-        "mime_type": final_mime,
-        "bytes": blob,
-        "data_b64": base64.b64encode(blob).decode("ascii"),
-    }
+    if result["error"]:
+        return None
+    return result["data"]
 
 
 def split_reply_bubbles(reply_text, night_mode=False):
