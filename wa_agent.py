@@ -14,6 +14,7 @@ import threading
 import traceback
 import textwrap
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,40 +24,15 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
-from env_utils import load_dotenv
-
-load_dotenv()
-
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     ZoneInfo = None
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-
-
-def _env_path(name, default):
-    raw = os.environ.get(name, "").strip()
-    return Path(raw if raw else default).expanduser()
-
-
-def _load_text_setting(env_name, file_env_name="", default=""):
-    value = os.environ.get(env_name, "")
-    if value.strip():
-        return value.strip()
-    if file_env_name:
-        file_path = os.environ.get(file_env_name, "").strip()
-        if file_path:
-            try:
-                return Path(file_path).expanduser().read_text(encoding="utf-8").strip()
-            except OSError:
-                return default.strip()
-    return default.strip()
-
-
-BASE_DIR = _env_path("WA_BASE_DIR", str(PROJECT_DIR / "data"))
-DB_PATH = _env_path("WA_DB_PATH", str(BASE_DIR / "wa_agent.db"))
+DEFAULT_BASE_DIR = Path(os.environ.get("WA_BASE_DIR", "/var/www/html"))
+BASE_DIR = DEFAULT_BASE_DIR if DEFAULT_BASE_DIR.exists() else Path(__file__).resolve().parent
+DB_PATH = Path(os.environ.get("WA_DB_PATH", str(BASE_DIR / "wa_agent.db")))
 
 VERIFY_TOKEN = os.environ.get("WA_VERIFY_TOKEN", "")
 ACCESS_TOKEN = os.environ.get("WA_ACCESS_TOKEN", "")
@@ -66,10 +42,6 @@ TYPING_INDICATOR_DELAY_SECONDS = float(os.environ.get("WA_TYPING_INDICATOR_DELAY
 TYPING_INDICATOR_REFRESH_SECONDS = float(os.environ.get("WA_TYPING_INDICATOR_REFRESH_SECONDS", "4.0"))
 REPLY_JOB_POLL_SECONDS = float(os.environ.get("WA_REPLY_JOB_POLL_SECONDS", "0.05"))
 REPLY_JOB_TERMINATE_GRACE_SECONDS = float(os.environ.get("WA_REPLY_JOB_TERMINATE_GRACE_SECONDS", "0.25"))
-MAX_INLINE_REPLY_EMOJIS = int(os.environ.get("WA_MAX_INLINE_REPLY_EMOJIS", "1"))
-READ_RECEIPT_DELAY_SECONDS = float(os.environ.get("WA_READ_RECEIPT_DELAY_SECONDS", "0.45"))
-REPLY_WORKER_STALE_SECONDS = float(os.environ.get("WA_REPLY_WORKER_STALE_SECONDS", "90"))
-REPLY_RECOVERY_SCAN_SECONDS = float(os.environ.get("WA_REPLY_RECOVERY_SCAN_SECONDS", "30"))
 PROACTIVE_ENABLED = os.environ.get("WA_PROACTIVE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 PROACTIVE_SCAN_SECONDS = int(os.environ.get("WA_PROACTIVE_SCAN_SECONDS", "300"))
 PROACTIVE_MIN_SILENCE_MINUTES = int(os.environ.get("WA_PROACTIVE_MIN_SILENCE_MINUTES", "45"))
@@ -94,18 +66,22 @@ MINIMAX_BASE_URL = os.environ.get("WA_MINIMAX_BASE_URL", "https://api.minimaxi.c
 
 GROQ_API_KEY = os.environ.get("WA_GROQ_API_KEY") or os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("WA_GROQ_MODEL", "llama-3.3-70b-versatile")
+X_BEARER_TOKEN = os.environ.get("WA_X_BEARER_TOKEN", "")
+YOUTUBE_API_KEY = os.environ.get("WA_YOUTUBE_API_KEY", "")
+REDDIT_USER_AGENT = os.environ.get("WA_REDDIT_USER_AGENT", "SusuCloud/1.0")
 
-ADMIN_WA_ID = os.environ.get("WA_ADMIN_WA_ID", "")
-CLAUDE_WA_ID = os.environ.get("WA_CLAUDE_WA_ID", "")
+ADMIN_WA_ID = os.environ.get("WA_ADMIN_WA_ID", "85259576670")
+CLAUDE_WA_ID = os.environ.get("WA_CLAUDE_WA_ID", "8618704499898")
 CLAUDE_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://apiapipp.com")
-CLAUDE_CODE_WORKDIR = str(_env_path("WA_CLAUDE_CODE_WORKDIR", str(PROJECT_DIR)))
-WA_HOST = os.environ.get("WA_HOST", "127.0.0.1")
-WA_PORT = int(os.environ.get("WA_PORT", "9100"))
 
 # 安全詞
 MAX_IMAGE_ATTACHMENTS = int(os.environ.get("WA_MAX_IMAGE_ATTACHMENTS", "3"))
 MAX_IMAGE_BYTES = int(os.environ.get("WA_MAX_IMAGE_BYTES", str(5 * 1024 * 1024)))
+MAX_INLINE_REPLY_EMOJIS = int(os.environ.get("WA_MAX_INLINE_REPLY_EMOJIS", "1"))
+READ_RECEIPT_DELAY_SECONDS = float(os.environ.get("WA_READ_RECEIPT_DELAY_SECONDS", "0.45"))
+REPLY_WORKER_STALE_SECONDS = float(os.environ.get("WA_REPLY_WORKER_STALE_SECONDS", "90"))
+REPLY_RECOVERY_SCAN_SECONDS = float(os.environ.get("WA_REPLY_RECOVERY_SCAN_SECONDS", "30"))
 
 if ZoneInfo:
     try:
@@ -211,6 +187,34 @@ CHART_PREFERRED_DOMAINS = (
     "music.apple.com",
     "spotify.com",
 )
+NEWS_SOCIAL_PREFERRED_DOMAINS = (
+    "x.com",
+    "twitter.com",
+    "youtube.com",
+    "youtu.be",
+    "reddit.com",
+    "threads.net",
+)
+MUSIC_SOCIAL_PREFERRED_DOMAINS = (
+    "youtube.com",
+    "music.youtube.com",
+    "reddit.com",
+    "x.com",
+    "twitter.com",
+    "douyin.com",
+    "xiaohongshu.com",
+)
+PLATFORM_DOMAIN_HINTS = {
+    "x.com": ("twitter", "推特", "x.com", "x上", "x 上", "tweets"),
+    "twitter.com": ("twitter", "推特", "x.com", "x上", "x 上", "tweets"),
+    "youtube.com": ("youtube", "youtube music", "油管"),
+    "music.youtube.com": ("youtube", "youtube music", "油管"),
+    "reddit.com": ("reddit", "subreddit", "红迪", "紅迪"),
+    "threads.net": ("threads", "thread", "串串"),
+    "douyin.com": ("抖音", "douyin"),
+    "xiaohongshu.com": ("小红书", "小紅書", "rednote", "xiaohongshu"),
+    "mp.weixin.qq.com": ("微信", "wechat", "公众号", "公眾號", "公号", "公號"),
+}
 LIVE_SEARCH_SUMMARIZER_PROMPT = textwrap.dedent(
     """
     你係一個即時搜尋結果整理器。
@@ -286,11 +290,27 @@ SYSTEM_PERSONA = textwrap.dedent(
     - 日頭通常只回 1 到 2 句；夜晚可以比日頭長少少。
     - 一定要似真人聊天節奏，有時短短一句都得，但內容要完整。
     - 偏好用「嘻嘻」，唔好用「hehe」。
+    - emoji 只係偶爾點綴就夠，通常成段 0 到 1 個；唔好每句都加 emoji。
     - 唔好提自己係 AI、模型、系統、prompt、政策。
     """
 ).strip()
 
-PRIMARY_USER_MEMORY = _load_text_setting("WA_PRIMARY_USER_MEMORY", "WA_PRIMARY_USER_MEMORY_FILE", "")
+PRIMARY_USER_MEMORY = textwrap.dedent(
+    """
+    - 對方係東北人，而家住九龍塘 CityU 宿舍。
+    - 對方係 CityU 機械工程 MNE 學生，會上 CCIV、水課、MNE2029、MNE2036、MNE2110，之前上過網球課。
+    - 對方好鍾意攝影，常用 Nikon ZF 配老鏡同 FTZ adapter，仲有 Nikon FTn 同 Auto 40f2，之前玩過 GFX50S2 同 50R。
+    - 對方鍾意影街拍同風景，差唔多每餐都影相，iPad wallpaper 都係自己影嘅街景。
+    - 對方成日飲可樂，鍾意 C.C. Lemon、凍檸樂，同埋飲梅酒放鬆。
+    - 對方試過連續 7 日早餐食杯麵，識整牛肉餡餅同芹菜豬肉餃子，屋企有預製米飯。
+    - 對方鍾意魚蛋雲吞麵，週末會同損友飲酒、打德州撲克、打機。
+    - 對方打德州撲克贏過錢，玩 Valorant 勝率高。
+    - 對方聽國語歌同粵語歌，鍾意《實力至上主義教室》入面堀北鈴音，同埋《青春豬頭少年》。
+    - 對方戴 Samsung Galaxy Watch，會用 VPN、Imarena.ai、Claude、Sonnet、ChatGPT、Grok，同 Telegram。
+    - 對方自建過 Vultr Tokyo VPS，裝 Outline server，用 Clash Verge、Shadowrocket、Clash Meta，Tun Mode + Rule 分流，只想 AI 走代理，仲想喺 VPS 裝 Cloudflare WARP。
+    - 對方識普、粵、英，有語言天賦，鍾意撒嬌同甜啲嘅說話。
+    """
+).strip()
 
 MEMORY_EXTRACTOR_PROMPT = textwrap.dedent(
     """
@@ -851,6 +871,72 @@ def strip_search_tokens(text, tokens):
     return re.sub(r"\s+", " ", value).strip()
 
 
+def extract_explicit_platform_domains(text):
+    value = clean_text(text)
+    if not value:
+        return []
+    matched = []
+    for domain, hints in PLATFORM_DOMAIN_HINTS.items():
+        if contains_any_keyword(value, hints):
+            matched.append(domain)
+    return matched
+
+
+def strip_platform_tokens(text, domains=None):
+    active_domains = domains or PLATFORM_DOMAIN_HINTS.keys()
+    tokens = []
+    seen = set()
+    for domain in active_domains:
+        for token in PLATFORM_DOMAIN_HINTS.get(domain, ()):
+            key = token.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            tokens.append(token)
+    value = strip_search_tokens(normalize_search_entities(text), tuple(tokens))
+    return dedupe_search_terms(value or normalize_search_entities(text))
+
+
+def format_hk_datetime_label(value):
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).astimezone(HK_TZ).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ""
+    text = clean_text(value)
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(HK_TZ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return text
+
+
+def collect_provider_result_batches(loaders, timeout_seconds=12):
+    valid_loaders = [loader for loader in (loaders or []) if loader]
+    if not valid_loaders:
+        return []
+    batches = []
+    with ThreadPoolExecutor(max_workers=min(4, len(valid_loaders))) as executor:
+        futures = [executor.submit(loader) for loader in valid_loaders]
+        try:
+            for future in as_completed(futures, timeout=timeout_seconds):
+                try:
+                    value = future.result() or []
+                except Exception:
+                    value = []
+                if value:
+                    batches.append(value)
+        except Exception:
+            pass
+    return batches
+
+
 def is_music_query(text):
     value = normalize_search_entities(text)
     if not value:
@@ -883,6 +969,79 @@ def detect_live_search_mode(text):
     if is_music_query(value):
         return "music"
     return "web"
+
+# ─── User Location Tracking ───────────────────────────────────────────────────
+LOCATION_PATTERNS = [
+    # 我在X / 我喺X / I'm in X / heading to X / going to X
+    r"(?:我在|我喺|我依家|我宜家|依家喺|而家喺)([\w\u4e00-\u9fff\s]{1,20})",
+    r"(?:返(?:到|去)?|去|嚟)([\w\u4e00-\u9fff\s]{1,20})(?:附近|一带|度|到|返|過|过|住|紧)?",
+    r"(?:而家|依家|宜家)([\w\u4e00-\u9fff\s]{1,20})",
+    r"(?:去咇|去到|嚟到)([\w\u4e00-\u9fff\s]{1,20})",
+    r"(?:起身|训醒|瞓醒)(?:喺|咇)?([\w\u4e00-\u9fff\s]{1,20})",
+    # English
+    r"(?:i(?:'m|' m)?\s+(?:in|at|back\s+in|back\s+at|heading\s+to|going\s+to|just\s+got\s+to|now\s+in)\s+)([a-zA-Z\s]{2,30})",
+]
+
+LOCATION_HINTS = (
+    "旺角", "中環", "中环", "尖沙咀", "尖沙嘴", "铜锣湾", "銅鑼灣", "太子", "深水埗", "深水步",
+    "九龙塘", "九龍塘", "观塘", "觀塘", "荃湾", "荃灣", "东区", "東區", "南区",
+    "北角", "筲箕灣", "柴灣", "西贡", "西貢", "将军澳", "將軍澳", "东涌", "東湧",
+    "屯门", "屯門", "元朗", "天水圍", "粉岭", "上水", "沙田", "大埔",
+    "cityu", "城大", "理工", "polyu", "科大", "ust", "中大", "cuhk", "港大", "hku",
+    "長洲", "長洲", "深圳", "广州", "广州", "上海", "北京", "杭州", "成都", "重庆",
+    "武汉", "西安", "南京", "天津", "青岛", "珠海", "中山", "东莞", "佛山",
+    "澳门", "澳門", "macau",
+    "tokyo", "japan", "osaka", "kyoto", "seoul", "bangkok", "singapore",
+    "new york", "nyc", "los angeles", "sf", "chicago", "london", "paris", "sydney",
+)
+
+def extract_location_from_text(text):
+    if not text:
+        return None
+    value = clean_text(text)
+    for pat in LOCATION_PATTERNS:
+        m = re.search(pat, value, re.IGNORECASE)
+        if m:
+            loc = m.group(1).strip()
+            loc = re.sub(r"\s+", " ", loc).strip()
+            if loc and 2 <= len(loc) <= 25:
+                return loc
+    # fallback: keyword hints
+    for hint in LOCATION_HINTS:
+        if hint.lower() in value.lower():
+            return hint
+    return None
+
+def update_user_current_location(conn, wa_id, location):
+    if not location or not wa_id:
+        return False
+    text = clean_text(location)
+    if not text:
+        return False
+    now = utc_now()
+    try:
+        conn.execute(
+            "INSERT INTO wa_memories (wa_id, kind, content, memory_key, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(wa_id, memory_key) DO UPDATE SET kind=excluded.kind, content=excluded.content, updated_at=excluded.updated_at",
+            (wa_id, "location", text, "current_location", now, now),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        return False
+
+def get_user_current_location(conn, wa_id):
+    try:
+        row = conn.execute(
+            "SELECT content FROM wa_memories WHERE wa_id=? AND memory_key='current_location' LIMIT 1",
+            (wa_id,),
+        ).fetchone()
+        return row["content"] if row else None
+    except Exception:
+        return None
+
+
 
 
 def should_consider_live_search_router(text):
@@ -975,7 +1134,7 @@ def extract_search_query(text, mode="web"):
     return dedupe_search_terms(query or value)
 
 
-def build_news_search_query(query):
+def build_news_search_query(query, conn=None, wa_id=None):
     value = strip_search_tokens(normalize_search_entities(query), (
         "今日", "今天", "而家", "依家", "宜家", "最新", "即時", "即时", "頭條", "头条", "headline",
         "news", "新聞", "新闻", "大新聞", "大新闻", "有咩", "有乜", "發生咩事", "发生咩事", "知唔知",
@@ -984,7 +1143,11 @@ def build_news_search_query(query):
     value = re.sub(r"[?？!！,，。]+", " ", value)
     value = re.sub(r"\s+", " ", value).strip()
     if not value:
-        value = "香港" if contains_any_keyword(query, HK_DEFAULT_LOCATION_HINTS) else clean_text(query)
+        if conn and wa_id:
+            saved_loc = get_user_current_location(conn, wa_id)
+            value = saved_loc if saved_loc else "香港"
+        else:
+            value = "香港" if contains_any_keyword(query, HK_DEFAULT_LOCATION_HINTS) else clean_text(query)
     if contains_any_keyword(query, HK_DEFAULT_LOCATION_HINTS) and not contains_any_keyword(value, HK_DEFAULT_LOCATION_HINTS):
         value = f"香港 {value}"
     if not contains_any_keyword(value, ("新聞", "新闻", "news", "headline")):
@@ -1073,15 +1236,21 @@ query 要保留主體人物 / 地點 / 品牌名，唔好只輸出日期或者�
         return {}
 
 
-def build_live_search_plan(incoming_text):
+def build_live_search_plan(incoming_text, conn=None, wa_id=None):
     router_plan = route_live_search_with_model(incoming_text)
     if router_plan.get("should_search") and router_plan.get("mode") in {"weather", "news", "music", "web"}:
         mode = router_plan["mode"]
         query = router_plan.get("query") or ""
         if mode == "weather":
-            query = dedupe_search_terms(query or clean_text(incoming_text))
+            weather_q = query or clean_text(incoming_text)
+            if not any(kw in weather_q for kw in ("旺角", "中環", "九龍", "九龍塘", "深圳", "北京", "上海", "广州", "杭州", "香港", "HK", "hong kong", "shenzhen", "beijing", "shanghai", "guangzhou", "hangzhou")):
+                if conn and wa_id:
+                    saved_loc = get_user_current_location(conn, wa_id)
+                    if saved_loc:
+                        weather_q = f"{saved_loc} {weather_q}"
+            query = dedupe_search_terms(weather_q)
         elif mode == "news":
-            query = build_news_search_query(query or extract_search_query(incoming_text, mode=mode))
+            query = build_news_search_query(query or extract_search_query(incoming_text, mode=mode), conn=conn, wa_id=wa_id)
         elif mode == "music":
             query = build_music_search_query(query or extract_search_query(incoming_text, mode=mode))
         else:
@@ -1093,7 +1262,7 @@ def build_live_search_plan(incoming_text):
         if mode == "weather":
             query = dedupe_search_terms(clean_text(incoming_text))
         elif mode == "news":
-            query = build_news_search_query(extract_search_query(incoming_text, mode="web"))
+            query = build_news_search_query(extract_search_query(incoming_text, mode="web"), conn=conn, wa_id=wa_id)
         elif mode == "music":
             query = build_music_search_query(extract_search_query(incoming_text, mode="music"))
         else:
@@ -1162,12 +1331,19 @@ def score_search_result(item, mode, query, index=0):
     )
     score = max(0, 30 - index)
     score += lexical_query_overlap_score(query, haystack)
+    explicit_platform_domains = extract_explicit_platform_domains(query)
+    if any(host_matches_domain(host, domain) for domain in explicit_platform_domains):
+        score += 18
     if mode == "news":
         domain_rank = find_domain_rank(host, HK_NEWS_PREFERRED_DOMAINS)
         if domain_rank is None:
             domain_rank = find_domain_rank(host, GLOBAL_NEWS_PREFERRED_DOMAINS)
             if domain_rank is not None:
                 score += max(6, 18 - domain_rank * 2)
+            else:
+                social_rank = find_domain_rank(host, NEWS_SOCIAL_PREFERRED_DOMAINS)
+                if social_rank is not None:
+                    score += max(2, 10 - social_rank)
         else:
             score += max(12, 28 - domain_rank * 3)
         if clean_text(item.get("published_at")):
@@ -1176,6 +1352,10 @@ def score_search_result(item, mode, query, index=0):
         domain_rank = find_domain_rank(host, MUSIC_PREFERRED_DOMAINS)
         if domain_rank is not None:
             score += max(8, 16 - domain_rank * 2)
+        else:
+            social_rank = find_domain_rank(host, MUSIC_SOCIAL_PREFERRED_DOMAINS)
+            if social_rank is not None:
+                score += max(2, 8 - social_rank)
         freshness_terms = ("最新", "新歌", "單曲", "单曲", "專輯", "专辑", "single", "album", "mv", "發行", "发行", "release", "released")
         if contains_any_keyword(haystack, freshness_terms):
             score += 12
@@ -1252,6 +1432,41 @@ def parse_duckduckgo_results(html_text, limit=5):
     return results
 
 
+def search_tavily(query, limit=5):
+    """Search using Tavily - high quality LLM-optimized web search."""
+    api_key = os.environ.get("TAVILY_API_KEY", "")
+    if not api_key:
+        return []
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": limit,
+        "include_answer": False,
+        "include_raw_content": False,
+    }
+    try:
+        request = Request(
+            "https://api.tavily.com/search",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        results = []
+        for item in (data.get("results") or [])[:limit]:
+            results.append({
+                "title": clean_text(item.get("title", "")),
+                "url": clean_text(item.get("url", "")),
+                "snippet": clean_text(item.get("content", "")),
+                "source": clean_text(item.get("source", "")) or "Tavily",
+                "published_at": "",
+            })
+        return results
+    except Exception:
+        return []
+
+
 def search_duckduckgo_web(query, limit=5):
     url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"}, method="GET")
@@ -1302,19 +1517,175 @@ def search_google_news(query, limit=5):
     return parse_google_news_results(xml_text, limit=limit)
 
 
-def search_music_results(query, limit=5, ranking_query=False):
-    web_results = cached_live_json(
-        ("duckduckgo_music", query),
-        lambda: search_duckduckgo_web(query, limit=max(limit * 2, 8)),
-        ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+def search_reddit_results(query, limit=5, sort="relevance"):
+    if not query:
+        return []
+    url = f"https://www.reddit.com/search.json?q={quote_plus(query)}&sort={quote_plus(sort)}&limit={max(1, min(int(limit), 10))}&raw_json=1"
+    try:
+        data = fetch_json_url(
+            url,
+            timeout=15,
+            headers={"User-Agent": REDDIT_USER_AGENT, "Accept": "application/json"},
+        )
+    except Exception:
+        return []
+    results = []
+    for row in (((data or {}).get("data") or {}).get("children") or []):
+        item = (row or {}).get("data") or {}
+        title = clean_text(item.get("title"))
+        if not title:
+            continue
+        permalink = clean_text(item.get("permalink"))
+        url = f"https://www.reddit.com{permalink}" if permalink.startswith("/") else clean_text(item.get("url"))
+        subreddit = clean_text(item.get("subreddit_name_prefixed") or item.get("subreddit"))
+        snippet = clean_text(item.get("selftext") or item.get("url") or item.get("domain"))
+        results.append(
+            {
+                "title": title,
+                "snippet": snippet,
+                "url": url,
+                "source": f"Reddit {subreddit}".strip() if subreddit else "Reddit",
+                "published_at": format_hk_datetime_label(item.get("created_utc")),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def search_x_recent_posts(query, limit=5):
+    if not X_BEARER_TOKEN or not query:
+        return []
+    core_query = strip_platform_tokens(query, ("x.com", "twitter.com"))
+    search_query = clean_text(core_query or query)
+    if "-is:retweet" not in search_query:
+        search_query = f"{search_query} -is:retweet"
+    url = (
+        "https://api.x.com/2/tweets/search/recent"
+        f"?query={quote_plus(search_query)}"
+        f"&max_results={max(10, min(int(limit), 10))}"
+        "&tweet.fields=created_at,author_id,lang"
+        "&expansions=author_id"
+        "&user.fields=name,username"
     )
-    news_results = cached_live_json(
-        ("google_news_music", query),
-        lambda: search_google_news(query, limit=max(limit, 5)),
-        ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+    try:
+        data = fetch_json_url(
+            url,
+            timeout=15,
+            headers={"Authorization": f"Bearer {X_BEARER_TOKEN}", "User-Agent": "SusuCloud/1.0"},
+        )
+    except Exception:
+        return []
+    users = {}
+    for user in (((data or {}).get("includes") or {}).get("users") or []):
+        user_id = clean_text(user.get("id"))
+        if user_id:
+            users[user_id] = user
+    results = []
+    for item in ((data or {}).get("data") or []):
+        tweet_id = clean_text(item.get("id"))
+        text = clean_text(item.get("text"))
+        if not tweet_id or not text:
+            continue
+        user = users.get(clean_text(item.get("author_id"))) or {}
+        username = clean_text(user.get("username"))
+        source = f"X @{username}" if username else "X"
+        if username:
+            post_url = f"https://x.com/{username}/status/{tweet_id}"
+        else:
+            post_url = f"https://x.com/i/status/{tweet_id}"
+        results.append(
+            {
+                "title": text[:100],
+                "snippet": text,
+                "url": post_url,
+                "source": source,
+                "published_at": format_hk_datetime_label(item.get("created_at")),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def search_youtube_videos(query, limit=5, order="date", published_after_days=None):
+    if not YOUTUBE_API_KEY or not query:
+        return []
+    core_query = strip_platform_tokens(query, ("youtube.com", "music.youtube.com"))
+    search_query = clean_text(core_query or query)
+    url = (
+        "https://www.googleapis.com/youtube/v3/search"
+        f"?part=snippet&type=video&q={quote_plus(search_query)}"
+        f"&maxResults={max(1, min(int(limit), 10))}"
+        f"&order={quote_plus(order)}"
+        "&regionCode=HK"
+        "&relevanceLanguage=zh-Hant"
+        f"&key={quote_plus(YOUTUBE_API_KEY)}"
+    )
+    if published_after_days:
+        published_after = (datetime.now(timezone.utc) - timedelta(days=int(published_after_days))).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url += f"&publishedAfter={quote_plus(published_after)}"
+    try:
+        data = fetch_json_url(url, timeout=20)
+    except Exception:
+        return []
+    results = []
+    for item in ((data or {}).get("items") or []):
+        snippet = (item or {}).get("snippet") or {}
+        video_id = clean_text(((item or {}).get("id") or {}).get("videoId"))
+        title = clean_text(snippet.get("title"))
+        if not video_id or not title:
+            continue
+        results.append(
+            {
+                "title": title,
+                "snippet": clean_text(snippet.get("description")),
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "source": clean_text(snippet.get("channelTitle")) or "YouTube",
+                "published_at": format_hk_datetime_label(snippet.get("publishedAt")),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def search_music_results(query, limit=5, ranking_query=False):
+    provider_batches = collect_provider_result_batches(
+        [
+            lambda: cached_live_json(
+                ("duckduckgo_music", query),
+                lambda: search_duckduckgo_web(query, limit=max(limit * 2, 8)),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+            lambda: cached_live_json(
+                ("google_news_music", query),
+                lambda: search_google_news(query, limit=max(limit, 5)),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+            lambda: cached_live_json(
+                ("youtube_music", query),
+                lambda: search_youtube_videos(query, limit=max(limit, 4), order="date", published_after_days=365),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+            lambda: cached_live_json(
+                ("reddit_music", query),
+                lambda: search_reddit_results(strip_platform_tokens(query, ("reddit.com",)), limit=max(limit, 4), sort="relevance"),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+            lambda: cached_live_json(
+                ("x_music", query),
+                lambda: search_x_recent_posts(query, limit=max(limit, 4)),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            ),
+        ],
+        timeout_seconds=14,
     )
     mode = "music_chart" if ranking_query else "music"
-    return rank_search_results((web_results or []) + (news_results or []), mode, query)[:limit]
+    merged = []
+    for batch in provider_batches:
+        merged.extend(batch or [])
+    return rank_search_results(merged, mode, query)[:limit]
 
 
 def extract_quoted_titles(text, max_titles=8):
@@ -1497,26 +1868,73 @@ def fetch_live_search_results(mode, search_query, effective_text):
             }
         ]
     if mode == "news":
-        return rank_search_results(
-            cached_live_json(
-                ("google_news", search_query),
-                lambda: search_google_news(search_query, limit=8),
-                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
-            ),
-            mode,
-            search_query,
+        provider_batches = collect_provider_result_batches(
+            [
+                lambda: cached_live_json(
+                    ("google_news", search_query),
+                    lambda: search_google_news(search_query, limit=8),
+                    ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+                ),
+                lambda: cached_live_json(
+                    ("reddit_news", search_query),
+                    lambda: search_reddit_results(strip_platform_tokens(search_query, ("reddit.com",)), limit=4, sort="new"),
+                    ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+                ),
+                lambda: cached_live_json(
+                    ("youtube_news", search_query),
+                    lambda: search_youtube_videos(search_query, limit=4, order="date", published_after_days=7),
+                    ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+                ),
+                lambda: cached_live_json(
+                    ("x_news", search_query),
+                    lambda: search_x_recent_posts(search_query, limit=4),
+                    ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+                ),
+            ],
+            timeout_seconds=14,
         )
+        merged = []
+        for batch in provider_batches:
+            merged.extend(batch or [])
+        return rank_search_results(merged, mode, search_query)
     if mode == "music":
         return search_music_results(search_query, limit=6, ranking_query=is_ranking_query(effective_text))
-    return rank_search_results(
-        cached_live_json(
-            ("duckduckgo_web", search_query),
-            lambda: search_duckduckgo_web(search_query, limit=8),
+    explicit_domains = extract_explicit_platform_domains(effective_text or search_query)
+    provider_loaders = [
+        lambda: cached_live_json(
+            ("tavily_web", search_query),
+            lambda: search_tavily(search_query, limit=8),
             ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
         ),
-        mode,
-        search_query,
-    )
+    ]
+    if any(domain in explicit_domains for domain in ("reddit.com",)):
+        provider_loaders.append(
+            lambda: cached_live_json(
+                ("reddit_web", search_query),
+                lambda: search_reddit_results(strip_platform_tokens(search_query, ("reddit.com",)), limit=4, sort="relevance"),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            )
+        )
+    if any(domain in explicit_domains for domain in ("youtube.com", "music.youtube.com")):
+        provider_loaders.append(
+            lambda: cached_live_json(
+                ("youtube_web", search_query),
+                lambda: search_youtube_videos(search_query, limit=4, order="relevance", published_after_days=365),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            )
+        )
+    if any(domain in explicit_domains for domain in ("x.com", "twitter.com")):
+        provider_loaders.append(
+            lambda: cached_live_json(
+                ("x_web", search_query),
+                lambda: search_x_recent_posts(search_query, limit=4),
+                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+            )
+        )
+    merged = []
+    for batch in collect_provider_result_batches(provider_loaders, timeout_seconds=14):
+        merged.extend(batch or [])
+    return rank_search_results(merged, mode, search_query)
 
 
 def trim_search_snippet(text, max_length=110):
@@ -1612,7 +2030,7 @@ def fallback_live_search_reply(query, mode, results):
 
 def build_live_search_reply(incoming_text, conn=None, wa_id=""):
     effective_text = expand_live_search_followup_text(conn, wa_id, incoming_text)
-    plan = build_live_search_plan(effective_text)
+    plan = build_live_search_plan(effective_text, conn=conn, wa_id=wa_id)
     if not plan or not plan.get("should_search"):
         return None
 
@@ -1731,7 +2149,7 @@ def memories_look_duplicated(left, right):
     shorter, longer = (left_key, right_key) if len(left_key) <= len(right_key) else (right_key, left_key)
     if len(shorter) >= 10 and shorter in longer:
         return True
-    if len(shorter) >= 8 and difflib.SequenceMatcher(None, left_key, right_key).ratio() >= 0.78:
+    if len(shorter) >= 8 and difflib.SequenceMatcher(None, left_key, right_key).ratio() >= 0.58:
         return True
     return False
 
@@ -1999,11 +2417,12 @@ def send_whatsapp_text(to_number, body):
     return data
 
 
-def send_whatsapp_status_update(message_id, typing=False):
+def _send_status_update(message_id, typing=False):
+    """Fire-and-forget: sends request without waiting for response."""
     if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
-        return {"ok": False, "detail": "Missing WhatsApp credentials"}
+        return
     if not message_id:
-        return {"ok": False, "detail": "Missing message_id"}
+        return
 
     payload = {
         "messaging_product": "whatsapp",
@@ -2013,18 +2432,24 @@ def send_whatsapp_status_update(message_id, typing=False):
     if typing:
         payload["typing_indicator"] = {"type": "text"}
 
-    request = Request(
-        f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {ACCESS_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    with urlopen(request, timeout=15) as response:
-        raw = response.read().decode("utf-8")
-        return json.loads(raw) if raw else {"ok": True}
+    try:
+        request = Request(
+            f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {ACCESS_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        # Fire-and-forget: don't wait for response
+        urlopen(request, timeout=5)
+    except Exception:
+        pass
+
+def send_whatsapp_status_update(message_id, typing=False):
+    # Run HTTP request in a background thread so it never blocks the caller
+    threading.Thread(target=_send_status_update, args=(message_id, typing), daemon=True).start()
 
 
 def send_whatsapp_mark_as_read(message_id):
@@ -2060,48 +2485,22 @@ def download_graph_media(url):
     return payload, mime_type
 
 
-def fetch_whatsapp_image(media_id, timeout=20):
-    """Fetch WhatsApp image with overall timeout protection.
-
-    WhatsApp may send image+text as separate webhooks (image first, text second).
-    To avoid blocking the reply worker for too long when the image download is slow,
-    we enforce an overall timeout on the entire fetch operation.
-    """
+def fetch_whatsapp_image(media_id):
     if not media_id or not ACCESS_TOKEN:
         return None
-
-    result = {"data": None, "error": None}
-    fetched = threading.Event()
-
-    def _fetch():
-        try:
-            metadata = graph_get_json(media_id)
-            media_url = metadata.get("url")
-            mime_type = metadata.get("mime_type", "")
-            if not media_url or not mime_type.startswith("image/"):
-                result["data"] = None
-                fetched.set()
-                return
-            blob, header_mime = download_graph_media(media_url)
-            final_mime = mime_type or header_mime or "image/jpeg"
-            result["data"] = {
-                "media_id": media_id,
-                "mime_type": final_mime,
-                "bytes": blob,
-                "data_b64": base64.b64encode(blob).decode("ascii"),
-            }
-        except Exception as e:
-            result["error"] = e
-        finally:
-            fetched.set()
-
-    t = threading.Thread(target=_fetch, daemon=True)
-    t.start()
-    if not fetched.wait(timeout=timeout):
+    metadata = graph_get_json(media_id)
+    media_url = metadata.get("url")
+    mime_type = metadata.get("mime_type", "")
+    if not media_url or not mime_type.startswith("image/"):
         return None
-    if result["error"]:
-        return None
-    return result["data"]
+    blob, header_mime = download_graph_media(media_url)
+    final_mime = mime_type or header_mime or "image/jpeg"
+    return {
+        "media_id": media_id,
+        "mime_type": final_mime,
+        "bytes": blob,
+        "data_b64": base64.b64encode(blob).decode("ascii"),
+    }
 
 
 def split_reply_bubbles(reply_text, night_mode=False):
@@ -2339,8 +2738,6 @@ def _flush_delayed_read_receipts(wa_id, expected_cycle_id):
         state["pending_message_ids"] = []
         state["timer_running"] = False
         state["deadline_at"] = 0.0
-        # delay_consumed stays True so subsequent messages in the same
-        # round are marked as read immediately without starting new timers
     for message_id in message_ids:
         try:
             send_whatsapp_mark_as_read(message_id)
@@ -2361,13 +2758,27 @@ def schedule_inbound_mark_as_read(wa_id, message_id):
         if state.get("timer_running"):
             if message_value not in pending:
                 pending.append(message_value)
+            if state.get("delay_consumed"):
+                # Same cycle timer already consumed — flush pending AND this message immediately (async, no lock held)
+                pending_to_flush = list(pending)
+                pending[:] = []
+                state["timer_running"] = False
+                state["deadline_at"] = 0.0
+                all_ids = pending_to_flush + [message_value]
+                for mid in all_ids:
+                    threading.Thread(
+                        target=send_whatsapp_mark_as_read,
+                        args=(mid,),
+                        daemon=True
+                    ).start()
             return
         if state.get("delay_consumed"):
-            # Timer was already used in this cycle — mark as read immediately, no new timer
-            try:
-                send_whatsapp_mark_as_read(message_value)
-            except Exception:
-                pass
+            # Timer was already used in this cycle — mark as read immediately (async)
+            threading.Thread(
+                target=send_whatsapp_mark_as_read,
+                args=(message_value,),
+                daemon=True
+            ).start()
             return
         else:
             state["delay_consumed"] = True
@@ -3581,9 +3992,49 @@ def maybe_extract_memories(conn, wa_id, profile_name, incoming_text):
             seen.add(key)
             deduped.append(item)
 
+
+    # Auto-detect and update user location
+    detected_location = extract_location_from_text(incoming_text)
+    if detected_location:
+        update_user_current_location(conn, wa_id, detected_location)
+
     saved = []
     for item in deduped[:4]:
-        if is_long_term_memory_candidate(item) and upsert_memory(conn, wa_id, item, kind="auto"):
+        if not is_long_term_memory_candidate(item):
+            continue
+        # If similar to an existing memory, merge them into one richer version
+        merged_into = None
+        for existing_mem in existing:
+            if memories_look_duplicated(item, existing_mem):
+                merged_into = existing_mem
+                break
+        if merged_into:
+            # Merge the two: take the longer one as base, add any unique words from the shorter one
+            base = merged_into if len(merged_into) >= len(item) else item
+            other = item if len(base) == len(merged_into) else merged_into
+            # Find unique parts from 'other' not in 'base'
+            matcher = difflib.SequenceMatcher(None, base, other)
+            extra_parts = []
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag == 'insert':
+                    chunk = other[j1:j2].strip()
+                    if chunk:
+                        extra_parts.append(chunk)
+            if extra_parts:
+                merged = base.rstrip('。！？!?') + '、' + '、'.join(extra_parts)
+            else:
+                merged = base
+            key = normalize_key(merged_into)
+            now = utc_now()
+            conn.execute(
+                """
+                UPDATE wa_memories SET content = ?, updated_at = ?
+                WHERE wa_id = ? AND memory_key = ? AND kind = 'auto'
+                """,
+                (merged, now, wa_id, key),
+            )
+            saved.append(merged)
+        elif upsert_memory(conn, wa_id, item, kind="auto"):
             saved.append(item)
     if saved:
         conn.commit()
@@ -3617,6 +4068,19 @@ def heuristic_extract_session_memories(incoming_text):
     return deduped[:4]
 
 
+def extract_live_search_question_memory(incoming_text):
+    plan = build_live_search_plan(incoming_text)
+    if not plan or not plan.get("should_search"):
+        return None
+    value = clean_text(incoming_text).rstrip("，。!?！？")
+    if len(value) < 4:
+        return None
+    return {
+        "bucket": "within_24h",
+        "content": f"對方啱啱問過：{value}",
+    }
+
+
 def maybe_extract_session_memories(conn, wa_id, incoming_text):
     prompt = f"""
 對方剛剛講：
@@ -3631,6 +4095,7 @@ def maybe_extract_session_memories(conn, wa_id, incoming_text):
 - 長期背景、長期偏好、長期習慣
 - 冇資訊量嘅撒嬌、純情緒、客套句
 - 太私密或太敏感細節
+- 但如果對方啱啱問即時資訊，例如新聞、天氣、最新作品、股價、比賽結果，呢條「問過咩」本身都算短期記憶
 
 最多 4 項。
 """.strip()
@@ -3650,6 +4115,10 @@ def maybe_extract_session_memories(conn, wa_id, incoming_text):
 
     if not extracted:
         extracted = heuristic_extract_session_memories(incoming_text)
+
+    live_search_question = extract_live_search_question_memory(incoming_text)
+    if live_search_question:
+        extracted.insert(0, live_search_question)
 
     saved = []
     for item in extracted:
@@ -3736,6 +4205,7 @@ def build_proactive_prompt(conn, wa_id, profile_name, now=None):
     now = now or hk_now()
     settings = get_runtime_settings()
     primary_text = primary_profile_memory_for_wa(wa_id, settings)
+    current_location = get_user_current_location(conn, wa_id)
     history_lines = []
     for item in load_recent_messages(conn, wa_id, limit=8):
         speaker = "對方" if item["direction"] == "inbound" else "蘇蘇"
@@ -4085,8 +4555,7 @@ def pick_susu_reaction(text, night_mode=False):
 
 
 
-def run_claude_code_streaming(task, wa_id, working_dir=None):
-    working_dir = working_dir or CLAUDE_CODE_WORKDIR
+def run_claude_code_streaming(task, wa_id, working_dir="/var/www/html"):
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = CLAUDE_API_KEY
     env["ANTHROPIC_BASE_URL"] = CLAUDE_BASE_URL
@@ -4314,6 +4783,7 @@ def reminder_loop():
 def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
     settings = get_runtime_settings()
     primary_text = primary_profile_memory_for_wa(wa_id, settings)
+    current_location = get_user_current_location(conn, wa_id)
     lookup_archive = should_lookup_archive(incoming_text)
     history_lines = []
     quotable = []  # [(message_id, preview)]
@@ -4358,6 +4828,7 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
 过往归档记忆（7 天前，只在对方追问旧事时优先参考）：
 {archived_text}"""
     image_stats_text = load_image_stats_summary(conn, wa_id)
+    location_note = (f"【用户当前位置】{current_location}\n" if current_location else "")
     prompt_user_text = clean_text(incoming_text) or "（对方这次只发了图片，没有额外文字）"
 
     image_note = ""
@@ -4409,7 +4880,7 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
 最近聊天：
 {history_text}
 
-对方刚刚讲嘅内容：
+{location_note}对方刚刚讲嘅内容：
 {prompt_user_text}{image_note}
 
 时段风格：
@@ -4439,8 +4910,8 @@ def is_emoji_base_char(char):
     codepoint = ord(char)
     return (
         0x1F300 <= codepoint <= 0x1FAFF
-        or 0x2600 <= codepoint <= 0x27BF
-        or codepoint in {0x2764, 0x3030, 0x303D, 0x3297, 0x3299}
+        or 0x2600 <= codepoint <= 0x26FF
+        or 0x2700 <= codepoint <= 0x27BF
     )
 
 
@@ -4542,6 +5013,7 @@ def rewrite_as_complete_message(profile_name, incoming_text, draft_reply):
 - 日頭偏向 1 到 2 句，夜晚可以 2 到 3 句
 - 要有少少關心或者追問
 - 唔好太正經
+- emoji 只可以偶爾點綴，通常最多 1 個，唔好每句都有
 - 只輸出回覆本身
     """.strip()
     return generate_model_text(prompt, temperature=0.72, max_tokens=180)
@@ -4975,6 +5447,7 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
 - 唔好叫對方閉眼或者快啲去瞓
 - 可以關心、可以撒嬌、可以追問
 - 保持短句
+- emoji 只可以偶爾點綴，通常最多 1 個，唔好每句都有
 - 只輸出回覆本身
 """.strip()
         reply = shorten_whatsapp_reply(
@@ -5002,6 +5475,7 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
 - 日頭偏向 1 到 2 句，夜晚可以 2 到 3 句
 - 要有關心感
 - 要有少少撒嬌或者甜味
+- emoji 只可以偶爾點綴，通常最多 1 個，唔好每句都有
 - 一定要完整
 - 只輸出回覆本身
 """.strip()
@@ -5164,5 +5638,5 @@ if __name__ == "__main__":
     threading.Thread(target=proactive_loop, name="wa-proactive-loop", daemon=True).start()
     threading.Thread(target=reminder_loop, name="wa-reminder-loop", daemon=True).start()
     threading.Thread(target=pending_reply_recovery_loop, name="wa-reply-recovery-loop", daemon=True).start()
-    server = ThreadingHTTPServer((WA_HOST, WA_PORT), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", 9100), Handler)
     server.serve_forever()
