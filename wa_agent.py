@@ -3933,10 +3933,6 @@ def maybe_extract_session_memories(conn, wa_id, incoming_text):
     if not extracted:
         extracted = heuristic_extract_session_memories(incoming_text)
 
-    live_search_question = extract_live_search_question_memory(incoming_text)
-    if live_search_question:
-        extracted.insert(0, live_search_question)
-
     saved = []
     for item in extracted:
         if upsert_session_memory(conn, wa_id, item["content"], bucket=item["bucket"]):
