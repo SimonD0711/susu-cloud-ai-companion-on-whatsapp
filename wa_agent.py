@@ -79,6 +79,8 @@ CLAUDE_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://apiapipp.com")
 MAX_IMAGE_ATTACHMENTS = int(os.environ.get("WA_MAX_IMAGE_ATTACHMENTS", "3"))
 MAX_IMAGE_BYTES = int(os.environ.get("WA_MAX_IMAGE_BYTES", str(5 * 1024 * 1024)))
 MAX_INLINE_REPLY_EMOJIS = int(os.environ.get("WA_MAX_INLINE_REPLY_EMOJIS", "1"))
+REPLY_WORKER_STALE_SECONDS = float(os.environ.get("WA_REPLY_WORKER_STALE_SECONDS", "90"))
+REPLY_RECOVERY_SCAN_SECONDS = float(os.environ.get("WA_REPLY_RECOVERY_SCAN_SECONDS", "30"))
 
 if ZoneInfo:
     try:
@@ -2563,16 +2565,35 @@ def format_quote_context_tag(item):
     return "[對方呢句係回覆緊一則較早訊息]"
 
 
+def default_reply_worker_state():
+    return {
+        "version": 0,
+        "profile_name": "",
+        "running": False,
+        "heartbeat_at": 0.0,
+    }
+
+
+def touch_reply_worker_heartbeat(wa_id):
+    now_value = time.monotonic()
+    with _reply_worker_states_lock:
+        state = _reply_worker_states.setdefault(wa_id, default_reply_worker_state())
+        state["heartbeat_at"] = now_value
+        return now_value
+
+
 def mark_reply_worker_dirty(wa_id, profile_name=""):
     should_start = False
+    now_value = time.monotonic()
     with _reply_worker_states_lock:
-        state = _reply_worker_states.setdefault(
-            wa_id,
-            {"version": 0, "profile_name": "", "running": False},
-        )
+        state = _reply_worker_states.setdefault(wa_id, default_reply_worker_state())
+        heartbeat_at = float(state.get("heartbeat_at", 0.0) or 0.0)
+        if state.get("running") and heartbeat_at and now_value - heartbeat_at > max(REPLY_WORKER_STALE_SECONDS, 5.0):
+            state["running"] = False
         state["version"] += 1
         if profile_name:
             state["profile_name"] = profile_name
+        state["heartbeat_at"] = now_value
         if not state["running"]:
             state["running"] = True
             should_start = True
@@ -2582,22 +2603,17 @@ def mark_reply_worker_dirty(wa_id, profile_name=""):
 
 def get_reply_worker_snapshot(wa_id):
     with _reply_worker_states_lock:
-        state = _reply_worker_states.setdefault(
-            wa_id,
-            {"version": 0, "profile_name": "", "running": False},
-        )
+        state = _reply_worker_states.setdefault(wa_id, default_reply_worker_state())
         return state["version"], state["profile_name"], state["running"]
 
 
 def finish_reply_worker_if_idle(wa_id, observed_version):
     with _reply_worker_states_lock:
-        state = _reply_worker_states.setdefault(
-            wa_id,
-            {"version": 0, "profile_name": "", "running": False},
-        )
+        state = _reply_worker_states.setdefault(wa_id, default_reply_worker_state())
         if state["version"] != observed_version:
             return False
         state["running"] = False
+        state["heartbeat_at"] = time.monotonic()
         return True
 
 
@@ -4872,6 +4888,7 @@ def process_pending_replies_for_contact(wa_id):
     conn = get_db()
     try:
         while True:
+            touch_reply_worker_heartbeat(wa_id)
             target_version, profile_name, _ = get_reply_worker_snapshot(wa_id)
             latest_inbound_id = get_latest_inbound_id(conn, wa_id)
             if not latest_inbound_id:
@@ -4961,6 +4978,7 @@ def process_pending_replies_for_contact(wa_id):
 
                 superseded = False
                 while reply_proc.poll() is None:
+                    touch_reply_worker_heartbeat(wa_id)
                     latest_version, latest_profile_name, _ = get_reply_worker_snapshot(wa_id)
                     if latest_profile_name:
                         profile_name = latest_profile_name
@@ -5062,6 +5080,48 @@ def ensure_reply_worker_running(wa_id, profile_name=""):
     if should_start:
         thread = threading.Thread(target=process_pending_replies_for_contact, args=(wa_id,), daemon=True)
         thread.start()
+
+
+def recover_pending_reply_contacts_once(limit=12):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT c.wa_id, c.profile_name
+            FROM wa_contacts c
+            WHERE EXISTS (
+                SELECT 1
+                FROM wa_messages inbound
+                WHERE inbound.wa_id = c.wa_id
+                  AND inbound.direction = 'inbound'
+                  AND inbound.message_type IN ('text', 'image')
+                  AND inbound.id > COALESCE((
+                      SELECT MAX(outbound.id)
+                      FROM wa_messages outbound
+                      WHERE outbound.wa_id = c.wa_id
+                        AND outbound.direction = 'outbound'
+                        AND outbound.message_type = 'text'
+                  ), 0)
+            )
+            ORDER BY c.updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        ensure_reply_worker_running(clean_text(row["wa_id"]), clean_text(row["profile_name"]))
+
+
+def pending_reply_recovery_loop():
+    time.sleep(3)
+    while True:
+        try:
+            recover_pending_reply_contacts_once()
+        except Exception:
+            pass
+        time.sleep(max(REPLY_RECOVERY_SCAN_SECONDS, 5.0))
 
 
 def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
@@ -5304,5 +5364,6 @@ if __name__ == "__main__":
     bootstrap_conn.close()
     threading.Thread(target=proactive_loop, name="wa-proactive-loop", daemon=True).start()
     threading.Thread(target=reminder_loop, name="wa-reminder-loop", daemon=True).start()
+    threading.Thread(target=pending_reply_recovery_loop, name="wa-reply-recovery-loop", daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", 9100), Handler)
     server.serve_forever()
