@@ -79,6 +79,7 @@ CLAUDE_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://apiapipp.com")
 MAX_IMAGE_ATTACHMENTS = int(os.environ.get("WA_MAX_IMAGE_ATTACHMENTS", "3"))
 MAX_IMAGE_BYTES = int(os.environ.get("WA_MAX_IMAGE_BYTES", str(5 * 1024 * 1024)))
 MAX_INLINE_REPLY_EMOJIS = int(os.environ.get("WA_MAX_INLINE_REPLY_EMOJIS", "1"))
+READ_RECEIPT_DELAY_SECONDS = float(os.environ.get("WA_READ_RECEIPT_DELAY_SECONDS", "0.45"))
 REPLY_WORKER_STALE_SECONDS = float(os.environ.get("WA_REPLY_WORKER_STALE_SECONDS", "90"))
 REPLY_RECOVERY_SCAN_SECONDS = float(os.environ.get("WA_REPLY_RECOVERY_SCAN_SECONDS", "30"))
 
@@ -97,6 +98,8 @@ _live_lookup_cache = {}
 _live_lookup_cache_lock = threading.Lock()
 _reply_worker_states = {}
 _reply_worker_states_lock = threading.Lock()
+_read_scheduler_states = {}
+_read_scheduler_states_lock = threading.Lock()
 
 WEATHER_QUERY_KEYWORDS = (
     "天氣", "天气", "weather", "氣溫", "气温", "幾度", "几度", "落雨", "落唔落雨",
@@ -2290,7 +2293,10 @@ def send_whatsapp_text(to_number, body):
     )
     with urlopen(request, timeout=20) as response:
         raw = response.read().decode("utf-8")
-        return json.loads(raw) if raw else {"ok": True}
+        data = json.loads(raw) if raw else {"ok": True}
+    if (data.get("messages") or [{}])[0].get("id", ""):
+        reset_contact_read_cycle(to_number)
+    return data
 
 
 def send_whatsapp_status_update(message_id, typing=False):
@@ -2563,6 +2569,92 @@ def format_quote_context_tag(item):
     if quoted_preview and quoted_preview != "較早訊息":
         return f"[對方呢句係回覆緊 {quoted_preview}]"
     return "[對方呢句係回覆緊一則較早訊息]"
+
+
+def default_read_scheduler_state():
+    return {
+        "delay_consumed": False,
+        "pending_message_ids": [],
+        "timer_running": False,
+        "deadline_at": 0.0,
+        "cycle_id": 0,
+    }
+
+
+def reset_contact_read_cycle(wa_id):
+    wa_value = clean_text(wa_id)
+    if not wa_value:
+        return
+    with _read_scheduler_states_lock:
+        state = _read_scheduler_states.setdefault(wa_value, default_read_scheduler_state())
+        state["delay_consumed"] = False
+        state["pending_message_ids"] = []
+        state["timer_running"] = False
+        state["deadline_at"] = 0.0
+        state["cycle_id"] = int(state.get("cycle_id", 0) or 0) + 1
+
+
+def _flush_delayed_read_receipts(wa_id, expected_cycle_id):
+    time.sleep(max(READ_RECEIPT_DELAY_SECONDS, 0.0))
+    with _read_scheduler_states_lock:
+        state = _read_scheduler_states.setdefault(wa_id, default_read_scheduler_state())
+        if int(state.get("cycle_id", 0) or 0) != int(expected_cycle_id):
+            return
+        if not state.get("timer_running"):
+            return
+        message_ids = []
+        seen = set()
+        for message_id in state.get("pending_message_ids") or []:
+            value = clean_text(message_id)
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            message_ids.append(value)
+        state["pending_message_ids"] = []
+        state["timer_running"] = False
+        state["deadline_at"] = 0.0
+    for message_id in message_ids:
+        try:
+            send_whatsapp_mark_as_read(message_id)
+        except Exception:
+            pass
+
+
+def schedule_inbound_mark_as_read(wa_id, message_id):
+    wa_value = clean_text(wa_id)
+    message_value = clean_text(message_id)
+    if not wa_value or not message_value:
+        return
+    start_timer = False
+    cycle_id = 0
+    with _read_scheduler_states_lock:
+        state = _read_scheduler_states.setdefault(wa_value, default_read_scheduler_state())
+        pending = state.setdefault("pending_message_ids", [])
+        if state.get("timer_running"):
+            if message_value not in pending:
+                pending.append(message_value)
+            return
+        if state.get("delay_consumed"):
+            immediate = True
+        else:
+            immediate = False
+            state["delay_consumed"] = True
+            state["timer_running"] = True
+            state["deadline_at"] = time.monotonic() + max(READ_RECEIPT_DELAY_SECONDS, 0.0)
+            state["pending_message_ids"] = [message_value]
+            cycle_id = int(state.get("cycle_id", 0) or 0)
+            start_timer = True
+    if start_timer:
+        threading.Thread(
+            target=_flush_delayed_read_receipts,
+            args=(wa_value, cycle_id),
+            daemon=True,
+        ).start()
+        return
+    try:
+        send_whatsapp_mark_as_read(message_value)
+    except Exception:
+        pass
 
 
 def default_reply_worker_state():
@@ -4248,9 +4340,12 @@ def send_whatsapp_quote(to_number, body, quoted_message_id):
         capture_output=True, text=True,
     )
     try:
-        return json.loads(result.stdout)
+        data = json.loads(result.stdout)
     except Exception:
         return {}
+    if (data.get("messages") or [{}])[0].get("id", ""):
+        reset_contact_read_cycle(to_number)
+    return data
 
 
 def pick_susu_reaction(text, night_mode=False):
@@ -5324,16 +5419,13 @@ class Handler(BaseHTTPRequestHandler):
                 if event["message_type"] in ("text", "image"):
                     dirty_contacts[event["wa_id"]] = event["profile_name"]
                     if event["message_id"]:
-                        read_candidates.append(event["message_id"])
+                        read_candidates.append((event["wa_id"], event["message_id"]))
             conn.commit()
         finally:
             conn.close()
 
-        for message_id in read_candidates:
-            try:
-                send_whatsapp_mark_as_read(message_id)
-            except Exception:
-                pass
+        for wa_id, message_id in read_candidates:
+            schedule_inbound_mark_as_read(wa_id, message_id)
 
         for wa_id, profile_name in dirty_contacts.items():
             ensure_reply_worker_running(wa_id, profile_name)
