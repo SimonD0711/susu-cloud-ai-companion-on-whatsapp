@@ -2313,6 +2313,8 @@ def _flush_delayed_read_receipts(wa_id, expected_cycle_id):
         state["pending_message_ids"] = []
         state["timer_running"] = False
         state["deadline_at"] = 0.0
+        # delay_consumed stays True so subsequent messages in the same
+        # round are marked as read immediately without starting new timers
     for message_id in message_ids:
         try:
             send_whatsapp_mark_as_read(message_id)
@@ -2335,9 +2337,13 @@ def schedule_inbound_mark_as_read(wa_id, message_id):
                 pending.append(message_value)
             return
         if state.get("delay_consumed"):
-            immediate = True
+            # Timer was already used in this cycle — mark as read immediately, no new timer
+            try:
+                send_whatsapp_mark_as_read(message_value)
+            except Exception:
+                pass
+            return
         else:
-            immediate = False
             state["delay_consumed"] = True
             state["timer_running"] = True
             state["deadline_at"] = time.monotonic() + max(READ_RECEIPT_DELAY_SECONDS, 0.0)
