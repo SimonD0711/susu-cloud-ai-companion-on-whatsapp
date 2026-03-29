@@ -66,6 +66,10 @@ TYPING_INDICATOR_DELAY_SECONDS = float(os.environ.get("WA_TYPING_INDICATOR_DELAY
 TYPING_INDICATOR_REFRESH_SECONDS = float(os.environ.get("WA_TYPING_INDICATOR_REFRESH_SECONDS", "4.0"))
 REPLY_JOB_POLL_SECONDS = float(os.environ.get("WA_REPLY_JOB_POLL_SECONDS", "0.05"))
 REPLY_JOB_TERMINATE_GRACE_SECONDS = float(os.environ.get("WA_REPLY_JOB_TERMINATE_GRACE_SECONDS", "0.25"))
+MAX_INLINE_REPLY_EMOJIS = int(os.environ.get("WA_MAX_INLINE_REPLY_EMOJIS", "1"))
+READ_RECEIPT_DELAY_SECONDS = float(os.environ.get("WA_READ_RECEIPT_DELAY_SECONDS", "0.45"))
+REPLY_WORKER_STALE_SECONDS = float(os.environ.get("WA_REPLY_WORKER_STALE_SECONDS", "90"))
+REPLY_RECOVERY_SCAN_SECONDS = float(os.environ.get("WA_REPLY_RECOVERY_SCAN_SECONDS", "30"))
 PROACTIVE_ENABLED = os.environ.get("WA_PROACTIVE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 PROACTIVE_SCAN_SECONDS = int(os.environ.get("WA_PROACTIVE_SCAN_SECONDS", "300"))
 PROACTIVE_MIN_SILENCE_MINUTES = int(os.environ.get("WA_PROACTIVE_MIN_SILENCE_MINUTES", "45"))
@@ -118,6 +122,8 @@ _live_lookup_cache = {}
 _live_lookup_cache_lock = threading.Lock()
 _reply_worker_states = {}
 _reply_worker_states_lock = threading.Lock()
+_read_scheduler_states = {}
+_read_scheduler_states_lock = threading.Lock()
 
 WEATHER_QUERY_KEYWORDS = (
     "天氣", "天气", "weather", "氣溫", "气温", "幾度", "几度", "落雨", "落唔落雨",
@@ -1987,7 +1993,10 @@ def send_whatsapp_text(to_number, body):
     )
     with urlopen(request, timeout=20) as response:
         raw = response.read().decode("utf-8")
-        return json.loads(raw) if raw else {"ok": True}
+        data = json.loads(raw) if raw else {"ok": True}
+    if (data.get("messages") or [{}])[0].get("id", ""):
+        reset_contact_read_cycle(to_number)
+    return data
 
 
 def send_whatsapp_status_update(message_id, typing=False):
@@ -2158,16 +2167,225 @@ def has_processed_message(conn, message_id):
     return bool(row)
 
 
+def parse_message_context(raw_payload):
+    payload = {}
+    if isinstance(raw_payload, dict):
+        payload = raw_payload
+    else:
+        try:
+            payload = json.loads(raw_payload or "{}")
+        except Exception:
+            payload = {}
+    context = payload.get("context") if isinstance(payload, dict) else {}
+    if not isinstance(context, dict):
+        context = {}
+    return {
+        "quoted_message_id": clean_text(context.get("id") or context.get("message_id")),
+        "quoted_from": clean_text(context.get("from")),
+    }
+
+
+def load_message_lookup_by_ids(conn, wa_id, message_ids):
+    cleaned_ids = []
+    seen = set()
+    for message_id in message_ids or []:
+        value = clean_text(message_id)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        cleaned_ids.append(value)
+    if not cleaned_ids:
+        return {}
+    placeholders = ",".join("?" for _ in cleaned_ids)
+    rows = conn.execute(
+        f"""
+        SELECT message_id, direction, message_type, body
+        FROM wa_messages
+        WHERE wa_id = ?
+          AND message_id IN ({placeholders})
+        """,
+        [wa_id, *cleaned_ids],
+    ).fetchall()
+    return {clean_text(row["message_id"]): dict(row) for row in rows}
+
+
+def format_quoted_message_preview(row, max_chars=48):
+    if not row:
+        return ""
+    speaker = "蘇蘇" if clean_text(row.get("direction")) == "outbound" else "對方"
+    body = clean_text(row.get("body", ""))
+    message_type = clean_text(row.get("message_type", ""))
+    if body:
+        preview = body
+    elif message_type == "image":
+        preview = "send 咗一張圖"
+    else:
+        preview = "一則較早訊息"
+    preview = preview.replace("\n", " ")
+    if len(preview) > max_chars:
+        preview = preview[:max_chars].rstrip() + "…"
+    return f"{speaker}：「{preview}」"
+
+
+def enrich_rows_with_quote_context(conn, wa_id, rows):
+    items = []
+    quoted_ids = []
+    for row in rows or []:
+        item = dict(row)
+        context = parse_message_context(item.get("raw_json") or item.get("raw") or {})
+        item.update(context)
+        quoted_message_id = clean_text(item.get("quoted_message_id"))
+        if quoted_message_id:
+            quoted_ids.append(quoted_message_id)
+        items.append(item)
+    quoted_lookup = load_message_lookup_by_ids(conn, wa_id, quoted_ids)
+    for item in items:
+        quoted_message_id = clean_text(item.get("quoted_message_id"))
+        if not quoted_message_id:
+            continue
+        quoted_row = quoted_lookup.get(quoted_message_id)
+        if quoted_row:
+            item["quoted_preview"] = format_quoted_message_preview(quoted_row)
+        else:
+            item["quoted_preview"] = "較早訊息"
+    return items
+
+
+def format_quote_context_suffix(item):
+    quoted_message_id = clean_text(item.get("quoted_message_id"))
+    if not quoted_message_id:
+        return ""
+    quoted_preview = clean_text(item.get("quoted_preview"))
+    if quoted_preview and quoted_preview != "較早訊息":
+        return f"（回覆 {quoted_preview}）"
+    return "（回覆較早訊息）"
+
+
+def format_quote_context_tag(item):
+    quoted_message_id = clean_text(item.get("quoted_message_id"))
+    if not quoted_message_id:
+        return ""
+    quoted_preview = clean_text(item.get("quoted_preview"))
+    if quoted_preview and quoted_preview != "較早訊息":
+        return f"[對方呢句係回覆緊 {quoted_preview}]"
+    return "[對方呢句係回覆緊一則較早訊息]"
+
+
+def default_read_scheduler_state():
+    return {
+        "delay_consumed": False,
+        "pending_message_ids": [],
+        "timer_running": False,
+        "deadline_at": 0.0,
+        "cycle_id": 0,
+    }
+
+
+def reset_contact_read_cycle(wa_id):
+    wa_value = clean_text(wa_id)
+    if not wa_value:
+        return
+    with _read_scheduler_states_lock:
+        state = _read_scheduler_states.setdefault(wa_value, default_read_scheduler_state())
+        state["delay_consumed"] = False
+        state["pending_message_ids"] = []
+        state["timer_running"] = False
+        state["deadline_at"] = 0.0
+        state["cycle_id"] = int(state.get("cycle_id", 0) or 0) + 1
+
+
+def _flush_delayed_read_receipts(wa_id, expected_cycle_id):
+    time.sleep(max(READ_RECEIPT_DELAY_SECONDS, 0.0))
+    with _read_scheduler_states_lock:
+        state = _read_scheduler_states.setdefault(wa_id, default_read_scheduler_state())
+        if int(state.get("cycle_id", 0) or 0) != int(expected_cycle_id):
+            return
+        if not state.get("timer_running"):
+            return
+        message_ids = []
+        seen = set()
+        for message_id in state.get("pending_message_ids") or []:
+            value = clean_text(message_id)
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            message_ids.append(value)
+        state["pending_message_ids"] = []
+        state["timer_running"] = False
+        state["deadline_at"] = 0.0
+    for message_id in message_ids:
+        try:
+            send_whatsapp_mark_as_read(message_id)
+        except Exception:
+            pass
+
+
+def schedule_inbound_mark_as_read(wa_id, message_id):
+    wa_value = clean_text(wa_id)
+    message_value = clean_text(message_id)
+    if not wa_value or not message_value:
+        return
+    start_timer = False
+    cycle_id = 0
+    with _read_scheduler_states_lock:
+        state = _read_scheduler_states.setdefault(wa_value, default_read_scheduler_state())
+        pending = state.setdefault("pending_message_ids", [])
+        if state.get("timer_running"):
+            if message_value not in pending:
+                pending.append(message_value)
+            return
+        if state.get("delay_consumed"):
+            immediate = True
+        else:
+            immediate = False
+            state["delay_consumed"] = True
+            state["timer_running"] = True
+            state["deadline_at"] = time.monotonic() + max(READ_RECEIPT_DELAY_SECONDS, 0.0)
+            state["pending_message_ids"] = [message_value]
+            cycle_id = int(state.get("cycle_id", 0) or 0)
+            start_timer = True
+    if start_timer:
+        threading.Thread(
+            target=_flush_delayed_read_receipts,
+            args=(wa_value, cycle_id),
+            daemon=True,
+        ).start()
+        return
+    try:
+        send_whatsapp_mark_as_read(message_value)
+    except Exception:
+        pass
+
+
+def default_reply_worker_state():
+    return {
+        "version": 0,
+        "profile_name": "",
+        "running": False,
+        "heartbeat_at": 0.0,
+    }
+
+
+def touch_reply_worker_heartbeat(wa_id):
+    now_value = time.monotonic()
+    with _reply_worker_states_lock:
+        state = _reply_worker_states.setdefault(wa_id, default_reply_worker_state())
+        state["heartbeat_at"] = now_value
+        return now_value
+
+
 def mark_reply_worker_dirty(wa_id, profile_name=""):
     should_start = False
+    now_value = time.monotonic()
     with _reply_worker_states_lock:
-        state = _reply_worker_states.setdefault(
-            wa_id,
-            {"version": 0, "profile_name": "", "running": False},
-        )
+        state = _reply_worker_states.setdefault(wa_id, default_reply_worker_state())
+        heartbeat_at = float(state.get("heartbeat_at", 0.0) or 0.0)
+        if state.get("running") and heartbeat_at and now_value - heartbeat_at > max(REPLY_WORKER_STALE_SECONDS, 5.0):
+            state["running"] = False
         state["version"] += 1
         if profile_name:
             state["profile_name"] = profile_name
+        state["heartbeat_at"] = now_value
         if not state["running"]:
             state["running"] = True
             should_start = True
@@ -2177,29 +2395,24 @@ def mark_reply_worker_dirty(wa_id, profile_name=""):
 
 def get_reply_worker_snapshot(wa_id):
     with _reply_worker_states_lock:
-        state = _reply_worker_states.setdefault(
-            wa_id,
-            {"version": 0, "profile_name": "", "running": False},
-        )
+        state = _reply_worker_states.setdefault(wa_id, default_reply_worker_state())
         return state["version"], state["profile_name"], state["running"]
 
 
 def finish_reply_worker_if_idle(wa_id, observed_version):
     with _reply_worker_states_lock:
-        state = _reply_worker_states.setdefault(
-            wa_id,
-            {"version": 0, "profile_name": "", "running": False},
-        )
+        state = _reply_worker_states.setdefault(wa_id, default_reply_worker_state())
         if state["version"] != observed_version:
             return False
         state["running"] = False
+        state["heartbeat_at"] = time.monotonic()
         return True
 
 
 def load_recent_messages(conn, wa_id, limit=12):
     rows = conn.execute(
         """
-        SELECT direction, message_id, body, created_at
+        SELECT direction, message_id, message_type, body, raw_json, created_at
         FROM wa_messages
         WHERE wa_id = ?
         ORDER BY id DESC
@@ -2207,7 +2420,7 @@ def load_recent_messages(conn, wa_id, limit=12):
         """,
         (wa_id, limit),
     ).fetchall()
-    return list(reversed(rows))
+    return enrich_rows_with_quote_context(conn, wa_id, reversed(rows))
 
 
 def parse_iso_dt(value):
@@ -2845,12 +3058,16 @@ def upsert_session_memory(conn, wa_id, content, bucket="within_7d", ttl_hours=No
     return True
 
 
-def build_combined_user_input(rows):
+def build_combined_user_input(rows, conn=None, wa_id=""):
+    enriched_rows = enrich_rows_with_quote_context(conn, wa_id, rows) if conn and wa_id else [dict(row) for row in rows]
     lines = []
     text_only_lines = []
-    for row in rows:
+    for row in enriched_rows:
         message_type = row.get("message_type", "")
         body = clean_text(row.get("body", ""))
+        quote_tag = format_quote_context_tag(row)
+        if quote_tag:
+            lines.append(quote_tag)
         if message_type == "text":
             if body:
                 lines.append(body)
@@ -3368,19 +3585,6 @@ def heuristic_extract_session_memories(incoming_text):
     return deduped[:4]
 
 
-def extract_live_search_question_memory(incoming_text):
-    plan = build_live_search_plan(incoming_text)
-    if not plan or not plan.get("should_search"):
-        return None
-    value = clean_text(incoming_text).rstrip("，。!?！？")
-    if len(value) < 4:
-        return None
-    return {
-        "bucket": "within_24h",
-        "content": f"對方啱啱問過：{value}",
-    }
-
-
 def maybe_extract_session_memories(conn, wa_id, incoming_text):
     prompt = f"""
 對方剛剛講：
@@ -3395,7 +3599,6 @@ def maybe_extract_session_memories(conn, wa_id, incoming_text):
 - 長期背景、長期偏好、長期習慣
 - 冇資訊量嘅撒嬌、純情緒、客套句
 - 太私密或太敏感細節
-- 但如果對方啱啱問即時資訊，例如新聞、天氣、最新作品、股價、比賽結果，呢條「問過咩」本身都算短期記憶
 
 最多 4 項。
 """.strip()
@@ -3415,10 +3618,6 @@ def maybe_extract_session_memories(conn, wa_id, incoming_text):
 
     if not extracted:
         extracted = heuristic_extract_session_memories(incoming_text)
-
-    live_search_question = extract_live_search_question_memory(incoming_text)
-    if live_search_question:
-        extracted.insert(0, live_search_question)
 
     saved = []
     for item in extracted:
@@ -3510,7 +3709,7 @@ def build_proactive_prompt(conn, wa_id, profile_name, now=None):
         speaker = "對方" if item["direction"] == "inbound" else "蘇蘇"
         body = clean_text(item["body"])
         if body:
-            history_lines.append(f"{speaker}: {body}")
+            history_lines.append(f"{speaker}{format_quote_context_suffix(item)}: {body}")
 
     dynamic_memories = build_filtered_long_term_memory_lines(load_memories(conn, wa_id), primary_text, limit=20)
     within_24h_memories = format_session_memory_lines(conn, wa_id, "within_24h", limit=4)
@@ -3823,9 +4022,12 @@ def send_whatsapp_quote(to_number, body, quoted_message_id):
         capture_output=True, text=True,
     )
     try:
-        return json.loads(result.stdout)
+        data = json.loads(result.stdout)
     except Exception:
         return {}
+    if (data.get("messages") or [{}])[0].get("id", ""):
+        reset_contact_read_cycle(to_number)
+    return data
 
 
 def pick_susu_reaction(text, night_mode=False):
@@ -4096,7 +4298,7 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
         except Exception:
             time_label = ""
         label = f"[{time_label}] " if time_label else ""
-        history_lines.append(f"{label}{speaker}: {body}")
+        history_lines.append(f"{label}{speaker}{format_quote_context_suffix(item)}: {body}")
         if item["direction"] == "inbound" and msg_id and len(body) > 3:
             quotable.append((msg_id, body[:40]))
 
@@ -4194,8 +4396,55 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
 - 如果對方問起「今日 / 尋晚 / 昨日 / 聽日 / 最近 / 呢星期」做過咩或者要做咩，先由對應時間層記憶搵答案，唔好亂估
 - 每條短期記憶前面都有時間碼，回覆時要按時間碼理解，唔好將舊事講到似而家仲發生緊
 - 最好有互动感，可以轻轻追问一句或者补一句撒娇
+- emoji 只係偶爾點綴，通常成段 0 到 1 個；唔好每句都帶表情
 - 直接输出苏苏要发畀对方嘅 WhatsApp 内容本身，唔好加说明{quote_hint}
 """.strip()
+
+
+def is_emoji_base_char(char):
+    if not char:
+        return False
+    codepoint = ord(char)
+    return (
+        0x1F300 <= codepoint <= 0x1FAFF
+        or 0x2600 <= codepoint <= 0x27BF
+        or codepoint in {0x2764, 0x3030, 0x303D, 0x3297, 0x3299}
+    )
+
+
+def is_emoji_modifier_char(char):
+    if not char:
+        return False
+    codepoint = ord(char)
+    return codepoint in (0xFE0F, 0x200D) or 0x1F3FB <= codepoint <= 0x1F3FF
+
+
+def trim_inline_reply_emojis(text, max_emojis=1):
+    if not text:
+        return ""
+    keep_limit = max(int(max_emojis), 0)
+    kept = 0
+    keeping_cluster = False
+    out = []
+    for char in text:
+        if is_emoji_base_char(char):
+            if kept >= keep_limit:
+                keeping_cluster = False
+                continue
+            kept += 1
+            keeping_cluster = True
+            out.append(char)
+            continue
+        if is_emoji_modifier_char(char):
+            if keeping_cluster:
+                out.append(char)
+            continue
+        keeping_cluster = False
+        out.append(char)
+    collapsed = "".join(out)
+    collapsed = re.sub(r" {2,}", " ", collapsed)
+    collapsed = re.sub(r" *\n *", "\n", collapsed)
+    return collapsed.strip()
 
 
 def normalize_reply(reply):
@@ -4203,7 +4452,21 @@ def normalize_reply(reply):
     text = text.replace("——", " ").replace("--", " ").replace("—", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
+    text = trim_inline_reply_emojis(text, max_emojis=MAX_INLINE_REPLY_EMOJIS)
     return text.strip(" \"'`")[:2000].strip()
+
+
+def extract_quote_directive(reply_text):
+    text = (reply_text or "").replace("\r\n", "\n").replace("\r", "\n").lstrip()
+    if not text:
+        return "", ""
+    first_line, sep, remainder = text.partition("\n")
+    match = re.match(r"^QUOTE\s*:\s*(\S+)\s*$", first_line.strip(), flags=re.IGNORECASE)
+    if not match:
+        return "", text.strip()
+    quoted_message_id = clean_text(match.group(1))
+    cleaned_text = remainder.strip() if sep else ""
+    return quoted_message_id, cleaned_text
 
 
 def shorten_whatsapp_reply(reply, night_mode=False):
@@ -4402,6 +4665,7 @@ def process_pending_replies_for_contact(wa_id):
     conn = get_db()
     try:
         while True:
+            touch_reply_worker_heartbeat(wa_id)
             target_version, profile_name, _ = get_reply_worker_snapshot(wa_id)
             latest_inbound_id = get_latest_inbound_id(conn, wa_id)
             if not latest_inbound_id:
@@ -4415,7 +4679,7 @@ def process_pending_replies_for_contact(wa_id):
                     return
                 continue
 
-            combined_text, memory_text = build_combined_user_input(pending_rows)
+            combined_text, memory_text = build_combined_user_input(pending_rows, conn=conn, wa_id=wa_id)
             image_inputs = collect_image_inputs(pending_rows)
             if not combined_text and not image_inputs:
                 if finish_reply_worker_if_idle(wa_id, target_version):
@@ -4429,11 +4693,6 @@ def process_pending_replies_for_contact(wa_id):
             typing_stop = None
 
             if batch_last_message_id:
-                try:
-                    send_whatsapp_mark_as_read(batch_last_message_id)
-                except Exception:
-                    pass
-
                 typing_stop = threading.Event()
 
                 def _typing_still_relevant(expected_version, expected_batch_id):
@@ -4491,6 +4750,7 @@ def process_pending_replies_for_contact(wa_id):
 
                 superseded = False
                 while reply_proc.poll() is None:
+                    touch_reply_worker_heartbeat(wa_id)
                     latest_version, latest_profile_name, _ = get_reply_worker_snapshot(wa_id)
                     if latest_profile_name:
                         profile_name = latest_profile_name
@@ -4530,7 +4790,8 @@ def process_pending_replies_for_contact(wa_id):
                 continue
 
             try:
-                bubbles = split_reply_bubbles(reply_text, night_mode=is_night_mode())
+                quoted_message_id, cleaned_reply_text = extract_quote_directive(reply_text)
+                bubbles = split_reply_bubbles(cleaned_reply_text or reply_text, night_mode=is_night_mode())
                 bubbles = maybe_stage_followup_bubbles(bubbles, night_mode=is_night_mode())
                 reaction_emoji = pick_susu_reaction(combined_text or "", night_mode=is_night_mode())
 
@@ -4553,7 +4814,10 @@ def process_pending_replies_for_contact(wa_id):
                         interrupted = True
                         break
 
-                    response = send_whatsapp_text(wa_id, bubble)
+                    if index == 0 and quoted_message_id:
+                        response = send_whatsapp_quote(wa_id, bubble, quoted_message_id)
+                    else:
+                        response = send_whatsapp_text(wa_id, bubble)
                     conn.execute(
                         """
                         INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at)
@@ -4588,6 +4852,48 @@ def ensure_reply_worker_running(wa_id, profile_name=""):
     if should_start:
         thread = threading.Thread(target=process_pending_replies_for_contact, args=(wa_id,), daemon=True)
         thread.start()
+
+
+def recover_pending_reply_contacts_once(limit=12):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT c.wa_id, c.profile_name
+            FROM wa_contacts c
+            WHERE EXISTS (
+                SELECT 1
+                FROM wa_messages inbound
+                WHERE inbound.wa_id = c.wa_id
+                  AND inbound.direction = 'inbound'
+                  AND inbound.message_type IN ('text', 'image')
+                  AND inbound.id > COALESCE((
+                      SELECT MAX(outbound.id)
+                      FROM wa_messages outbound
+                      WHERE outbound.wa_id = c.wa_id
+                        AND outbound.direction = 'outbound'
+                        AND outbound.message_type = 'text'
+                  ), 0)
+            )
+            ORDER BY c.updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        ensure_reply_worker_running(clean_text(row["wa_id"]), clean_text(row["profile_name"]))
+
+
+def pending_reply_recovery_loop():
+    time.sleep(3)
+    while True:
+        try:
+            recover_pending_reply_contacts_once()
+        except Exception:
+            pass
+        time.sleep(max(REPLY_RECOVERY_SCAN_SECONDS, 5.0))
 
 
 def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
@@ -4793,16 +5099,13 @@ class Handler(BaseHTTPRequestHandler):
                 if event["message_type"] in ("text", "image"):
                     dirty_contacts[event["wa_id"]] = event["profile_name"]
                     if event["message_id"]:
-                        read_candidates.append(event["message_id"])
+                        read_candidates.append((event["wa_id"], event["message_id"]))
             conn.commit()
         finally:
             conn.close()
 
-        for message_id in read_candidates:
-            try:
-                send_whatsapp_mark_as_read(message_id)
-            except Exception:
-                pass
+        for wa_id, message_id in read_candidates:
+            schedule_inbound_mark_as_read(wa_id, message_id)
 
         for wa_id, profile_name in dirty_contacts.items():
             ensure_reply_worker_running(wa_id, profile_name)
@@ -4828,5 +5131,6 @@ if __name__ == "__main__":
     bootstrap_conn.close()
     threading.Thread(target=proactive_loop, name="wa-proactive-loop", daemon=True).start()
     threading.Thread(target=reminder_loop, name="wa-reminder-loop", daemon=True).start()
+    threading.Thread(target=pending_reply_recovery_loop, name="wa-reply-recovery-loop", daemon=True).start()
     server = ThreadingHTTPServer((WA_HOST, WA_PORT), Handler)
     server.serve_forever()
