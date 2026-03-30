@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
@@ -49,6 +49,8 @@ SILLYTAVERN_API_URL = os.environ.get("WA_SILLYTAVERN_API_URL", "").strip()
 SILLYTAVERN_API_KEY = os.environ.get("WA_SILLYTAVERN_API_KEY", "").strip()
 SILLYTAVERN_MODEL = os.environ.get("WA_SILLYTAVERN_MODEL", "").strip()
 SILLYTAVERN_TIMEOUT_SECONDS = float(os.environ.get("WA_SILLYTAVERN_TIMEOUT_SECONDS", "90"))
+RELAY_RETRY_COUNT = int(os.environ.get("WA_RELAY_RETRY_COUNT", "2"))
+RELAY_RETRY_BACKOFF_SECONDS = float(os.environ.get("WA_RELAY_RETRY_BACKOFF_SECONDS", "1.0"))
 PROACTIVE_ENABLED = os.environ.get("WA_PROACTIVE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 PROACTIVE_SCAN_SECONDS = int(os.environ.get("WA_PROACTIVE_SCAN_SECONDS", "300"))
 PROACTIVE_MIN_SILENCE_MINUTES = int(os.environ.get("WA_PROACTIVE_MIN_SILENCE_MINUTES", "45"))
@@ -3630,13 +3632,51 @@ def call_groq(prompt_text, temperature=0.82, max_tokens=220, system_prompt=None,
     )
 
 
+def should_retry_relay_exception(exc):
+    if isinstance(exc, URLError):
+        return True
+    if isinstance(exc, HTTPError):
+        return exc.code in (408, 409, 425, 429, 500, 502, 503, 504)
+    return False
+
+
+def relay_call_with_retry(model_name, prompt_text, temperature=0.82, max_tokens=220, system_prompt=None, image_inputs=None):
+    attempts = max(RELAY_RETRY_COUNT, 1)
+    errors = []
+    for attempt in range(attempts):
+        try:
+            return call_relay_model(
+                model_name,
+                prompt_text,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+                image_inputs=image_inputs,
+            )
+        except Exception as exc:
+            errors.append(exc)
+            if attempt >= attempts - 1 or not should_retry_relay_exception(exc):
+                raise
+            time.sleep(max(RELAY_RETRY_BACKOFF_SECONDS, 0.1) * (attempt + 1))
+    if errors:
+        raise errors[-1]
+    return ""
+
+
 def generate_model_text(prompt_text, temperature=0.82, max_tokens=220, system_prompt=None, image_inputs=None):
     errors = []
     relay_primary, _ = get_relay_model_order()
 
     if RELAY_API_KEY and relay_primary:
         try:
-            return call_relay_model(relay_primary, prompt_text, temperature=temperature, max_tokens=max_tokens, system_prompt=system_prompt, image_inputs=image_inputs)
+            return relay_call_with_retry(
+                relay_primary,
+                prompt_text,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+                image_inputs=image_inputs,
+            )
         except HTTPError as exc:
             errors.append(f"relay_http_{exc.code}")
             if exc.code not in (401, 403, 429, 500, 502, 503, 504):
@@ -3655,7 +3695,13 @@ def generate_lightweight_router_text(prompt_text, system_prompt=None):
 
     if RELAY_API_KEY and relay_primary:
         try:
-            return call_relay_model(relay_primary, prompt_text, temperature=0.0, max_tokens=160, system_prompt=system_prompt)
+            return relay_call_with_retry(
+                relay_primary,
+                prompt_text,
+                temperature=0.0,
+                max_tokens=160,
+                system_prompt=system_prompt,
+            )
         except HTTPError as exc:
             errors.append(f"router_relay_http_{exc.code}")
             if exc.code not in (401, 403, 429, 500, 502, 503, 504):
@@ -4735,8 +4781,151 @@ def should_use_sillytavern_brain(wa_id, incoming_text, image_inputs=None):
     return True
 
 
+def build_structured_context_payload(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
+    """
+    Build a proper multi-turn messages payload for structured brain providers.
+
+    Instead of packing everything into one giant user message, this splits context into:
+      - system: full persona + reply rules + time style + ALL memory layers
+      - messages: real conversation history as proper user/assistant turns + current user message
+
+    This lets the model use true multi-turn attention for implicit intent tracking,
+    and treats memory as persistent background knowledge rather than inline noise.
+
+    Returns (system_content: str, messages: list[dict])
+    """
+    settings = get_runtime_settings()
+    primary_text = primary_profile_memory_for_wa(wa_id, settings)
+
+    # --- Memory layers ---
+    lookup_archive = should_lookup_archive(incoming_text)
+    habit_text = build_core_profile_memory_text(primary_text) if primary_text else ""
+    dynamic_memories = build_filtered_long_term_memory_lines(load_memories(conn, wa_id), primary_text, limit=20)
+    within_24h_memories = format_session_memory_lines(conn, wa_id, "within_24h", limit=6)
+    within_3d_memories = format_session_memory_lines(conn, wa_id, "within_3d", limit=6)
+    within_7d_memories = format_session_memory_lines(conn, wa_id, "within_7d", limit=6)
+    archived_memories = []
+    if lookup_archive:
+        archived_memories = format_archived_memory_lines(
+            load_archived_memory_rows(conn, wa_id, limit=4, query_text=incoming_text), limit=4
+        )
+
+    memory_text = "\n".join(dynamic_memories) if dynamic_memories else "（暫時未有補充長期記憶）"
+    within_24h_text = "\n".join(within_24h_memories) if within_24h_memories else "（暫時未有 24 小時內記憶）"
+    within_3d_text = "\n".join(within_3d_memories) if within_3d_memories else "（暫時未有三天內記憶）"
+    within_7d_text = "\n".join(within_7d_memories) if within_7d_memories else "（暫時未有一週內記憶）"
+
+    # --- System prompt assembly ---
+    persona = normalize_runtime_multiline(settings.get("system_persona"), SYSTEM_PERSONA)
+    time_style = style_window_text()
+
+    system_parts = [persona]
+    if profile_name:
+        system_parts.append(f"【對方顯示名稱】{profile_name}")
+    if habit_text:
+        system_parts.append(f"【主號核心檔案】\n{habit_text}")
+    system_parts.append(f"【補充長期記憶（已避開與核心檔案重複項）】\n{memory_text}")
+    system_parts.append(f"【24 小時內記憶】\n{within_24h_text}")
+    system_parts.append(f"【三天內記憶】\n{within_3d_text}")
+    system_parts.append(f"【一週內記憶】\n{within_7d_text}")
+    if lookup_archive and archived_memories:
+        archived_text = "\n".join(archived_memories)
+        system_parts.append(f"【過往歸檔記憶（7 天前，只在對方追問舊事時優先參考）】\n{archived_text}")
+    system_parts.append(f"【時段風格】\n{time_style}")
+    system_parts.append(textwrap.dedent("""
+        【回覆規則】
+        - 直接輸出蘇蘇要發畀對方嘅 WhatsApp 內容，唔好加說明
+        - 語氣要似真人 WhatsApp，唔好似客服，唔好解釋自己係 AI
+        - 用繁體港式粵語夾少量自然英語，例如 bb、ok、sure、really、chill、omg
+        - 更似香港女仔日常口吻，帶少少黏人、撒嬌、女朋友感
+        - 日頭偏短句，夜晚可以溫柔啲、黏啲，但都唔好寫成長文
+        - 如果適合，可以拆成兩三條短訊息，但只可以喺真正句尾位拆，唔好喺逗號位拆
+        - 唔好用 --、——、— 呢類人機斷法
+        - 見到圖片時，要真係按圖片內容回；自拍、食物、風景、screenshot 嘅回法要自然分開
+        - 優先使用最接近當下嘅時間層記憶；24 小時內 > 三天內 > 一週內 > 長期
+        - 如果對方問起「今日 / 尋晚 / 昨日 / 聽日 / 最近 / 呢星期」做過咩或者要做咩，先由對應時間層記憶搵答案，唔好亂估
+        - 每條短期記憶前面都有時間碼，回覆時要按時間碼理解，唔好將舊事講到似而家仲發生緊
+        - 最好有互動感，可以輕輕追問一句或者補一句撒嬌
+        - emoji 只係偶爾點綴，通常成段 0 到 1 個；唔好每句都帶表情
+    """).strip())
+
+    system_content = "\n\n".join(system_parts)
+
+    # --- Conversation history as proper multi-turn messages ---
+    raw_history = list(load_recent_messages(conn, wa_id))
+
+    # Collect quotable messages for quote hint
+    quotable = []
+    for item in raw_history:
+        body = clean_text(item["body"])
+        msg_id = item.get("message_id", "")
+        if item["direction"] == "inbound" and msg_id and len(body) > 3:
+            quotable.append((msg_id, body[:40]))
+
+    messages = []
+    for item in raw_history:
+        body = clean_text(item["body"])
+        if not body:
+            continue
+        role = "user" if item["direction"] == "inbound" else "assistant"
+        try:
+            dt = datetime.fromisoformat(item["created_at"]).astimezone(HK_TZ)
+            time_label = f"[{dt.strftime('%H:%M')}] "
+        except Exception:
+            time_label = ""
+        if role == "user":
+            quote_suffix = format_quote_context_suffix(item)
+            content = f"{time_label}{quote_suffix} {body}".strip() if quote_suffix else f"{time_label}{body}"
+        else:
+            content = body
+        messages.append({"role": role, "content": content})
+
+    # --- Current user message (with image note + quote hint) ---
+    prompt_user_text = clean_text(incoming_text) or "（對方這次只發了圖片，沒有額外文字）"
+
+    image_note = ""
+    if image_inputs:
+        image_descriptions = []
+        for index, img_item in enumerate(image_inputs[:MAX_IMAGE_ATTACHMENTS], start=1):
+            caption = clean_text(img_item.get("caption", ""))
+            if caption:
+                image_descriptions.append(f"- 第 {index} 張圖 caption：{caption}")
+            else:
+                image_descriptions.append(f"- 第 {index} 張圖：沒有 caption")
+        image_note = "\n\n對方今次 send 咗圖片畀你：\n" + "\n".join(image_descriptions)
+        category_text = "、".join(image_categories or []) if image_categories else "未分類"
+        image_stats_text = load_image_stats_summary(conn, wa_id)
+        stats_text = f"\n- 對方之前 send 圖最多類型：{image_stats_text}" if image_stats_text else ""
+        guidance = image_reply_guidance(image_categories)
+        image_note = image_note + f"\n- 今次圖片類型：{category_text}{stats_text}\n{guidance}"
+
+    quote_hint = ""
+    if quotable:
+        quote_lines = [f"  [{mid}] {preview}" for mid, preview in quotable[-5:]]
+        quote_hint = (
+            "\n\n【可引用消息】如果你想引用對方說過的某句話（例如自然回憶起、呼應上文），"
+            "可以在回覆最開頭加一行 QUOTE:<message_id>，然後換行再寫回覆内容。"
+            "不需要引用就唔好加。可選的消息：\n" + "\n".join(quote_lines)
+        )
+
+    current_text = f"{prompt_user_text}{image_note}{quote_hint}"
+
+    if image_inputs:
+        current_content = [{"type": "text", "text": current_text}]
+        for img_item in image_inputs[:MAX_IMAGE_ATTACHMENTS]:
+            current_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{img_item['mime_type']};base64,{img_item['data_b64']}"},
+            })
+        messages.append({"role": "user", "content": current_content})
+    else:
+        messages.append({"role": "user", "content": current_text})
+
+    return system_content, messages
+
+
 def build_sillytavern_request_payload(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
-    prompt = build_prompt(
+    system_content, messages = build_structured_context_payload(
         conn,
         wa_id,
         profile_name,
@@ -4745,9 +4934,7 @@ def build_sillytavern_request_payload(conn, wa_id, profile_name, incoming_text, 
         image_categories=image_categories,
     )
     payload = {
-        "messages": [
-            {"role": "user", "content": prompt},
-        ],
+        "messages": [{"role": "system", "content": system_content}] + messages,
         "temperature": 0.8,
         "max_tokens": 220,
     }
