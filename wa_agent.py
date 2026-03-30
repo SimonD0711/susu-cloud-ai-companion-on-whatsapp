@@ -4569,16 +4569,28 @@ def detect_question_like(text):
 
 
 def extract_reply_surface_text(text):
-    value = clean_text(text)
-    if not value:
+    raw_value = str(text or "").strip()
+    if not raw_value:
         return ""
-    lines = [clean_text(line) for line in value.splitlines() if clean_text(line)]
+    value = clean_text(raw_value)
+    lines = [clean_text(line) for line in re.split(r"[\r\n]+", raw_value) if clean_text(line)]
     if not lines:
         return value
     for line in reversed(lines):
-        if not line.startswith("[對方呢句係回覆"):
-            return line
-    return lines[-1]
+        lowered = line.lower()
+        if lowered.startswith("quote:"):
+            continue
+        if "回覆" in line or "回复" in line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            continue
+        if line.startswith("（") and ("回覆" in line or "回复" in line):
+            continue
+        if line.startswith("(") and ("reply" in lowered or "quote" in lowered):
+            continue
+        return line
+    stripped = re.sub(r"^[（(]?\s*(回覆|回复|reply|quote).*?[）)]\s*", "", value, flags=re.IGNORECASE).strip()
+    return stripped or lines[-1]
 
 
 def detect_clue_like_input(text):
@@ -4594,6 +4606,26 @@ def detect_clue_like_input(text):
         return True
     clue_markers = ["答案", "係", "系", "就係", "就是", "线索", "線索", "估下", "估吓"]
     return len(value) <= 20 and any(marker in value for marker in clue_markers)
+
+
+def detect_identifier_like_input(text):
+    value = extract_reply_surface_text(text)
+    compact = normalize_key(value)
+    if not compact:
+        return False
+    if re.fullmatch(r"[a-z]{2,8}\d{2,6}[a-z0-9]*", compact):
+        return True
+    if re.fullmatch(r"[a-z]{1,4}-\d{2,6}", compact):
+        return True
+    return False
+
+
+def has_explicit_reply_context(text):
+    value = clean_text(text)
+    if not value:
+        return False
+    lowered = value.lower()
+    return "quote:" in lowered or "回覆" in value or "回复" in value
 
 
 def detect_emotional_support(text):
@@ -4632,6 +4664,12 @@ def build_task_state(history_rows, incoming_text):
     user_intent = "chat naturally and keep the conversation moving"
     expected_next_move = "reply casually in Susu's tone"
     confidence = 0.35
+    identifier_like = detect_identifier_like_input(current_text)
+    has_reply_context = has_explicit_reply_context(incoming_text)
+    has_context_anchor = bool(previous_user or previous_assistant or latest_question_text)
+    short_answer_like = len(current_text) <= 20 and (
+        re.fullmatch(r"\d{1,4}", compact) or current_text.lower() in {"yes", "no", "ok", "sure"}
+    )
 
     live_search_plan = build_live_search_plan(current_text) or {}
     if live_search_plan.get("should_search"):
@@ -4639,16 +4677,27 @@ def build_task_state(history_rows, incoming_text):
         user_intent = "wants fresh factual information"
         expected_next_move = "use grounded search results before replying"
         confidence = 0.92
-    elif detect_clue_like_input(current_text) and (detect_question_like(previous_assistant) or detect_question_like(previous_user) or latest_question_text):
+    elif identifier_like:
+        task_type = "guessing_or_clue"
+        user_intent = "is sending a code or identifier that likely answers or narrows the current topic"
+        expected_next_move = "first explain what the code or identifier most likely refers to; if the exact meaning is unclear, ask a direct clarifying question instead of drifting to unrelated recent chat"
+        confidence = 0.96
+    elif detect_clue_like_input(current_text) and (detect_question_like(previous_assistant) or detect_question_like(previous_user) or latest_question_text or has_reply_context):
         task_type = "guessing_or_clue"
         user_intent = "is giving a clue or likely answer to an active guessing thread"
-        expected_next_move = "interpret the clue first, then respond as if you understood the implied answer"
+        if has_reply_context and not has_context_anchor:
+            expected_next_move = "the user is replying with a clue but the referenced context is missing, so ask one direct clarifying question instead of switching to unrelated recent topics"
+        else:
+            expected_next_move = "interpret the clue first, then respond as if you understood the implied answer, without switching to unrelated recent topics"
         confidence = 0.9
-    elif len(current_text) <= 20 and (re.fullmatch(r"\d{1,4}", compact) or current_text.lower() in {"yes", "no", "ok", "sure"}):
+    elif short_answer_like or (has_reply_context and len(current_text) <= 24):
         task_type = "followup_answer"
         user_intent = "is answering the previous question with a short follow-up"
-        expected_next_move = "resolve the missing context from recent history instead of treating this as standalone small talk"
-        confidence = 0.82
+        if has_reply_context and not has_context_anchor:
+            expected_next_move = "the user is replying briefly but the quoted context is missing, so ask one direct clarifying question instead of drifting to unrelated recent chat"
+        else:
+            expected_next_move = "resolve the missing context from recent history or quote context instead of treating this as standalone small talk"
+        confidence = 0.88 if has_reply_context else 0.82
     elif detect_emotional_support(current_text):
         task_type = "emotional_support"
         user_intent = "needs comfort, empathy, or reassurance"
@@ -4668,6 +4717,10 @@ def build_task_state(history_rows, incoming_text):
         "previous_user": previous_user,
         "previous_assistant": previous_assistant,
         "latest_question_text": latest_question_text,
+        "identifier_like": identifier_like,
+        "has_reply_context": has_reply_context,
+        "has_context_anchor": has_context_anchor,
+        "surface_text": current_text,
     }
 
 
@@ -4875,6 +4928,15 @@ def format_task_state_block(task_state):
         value = clean_text(task_state.get(key, ""))
         if value:
             lines.append(f"- {key}: {value}")
+    if task_state.get("identifier_like"):
+        lines.append("- identifier_hint: the current inbound looks like a code, identifier, or course code")
+    if task_state.get("has_reply_context"):
+        lines.append("- reply_context_hint: the current inbound explicitly looks like a reply to an earlier message")
+    if not task_state.get("has_context_anchor", True):
+        lines.append("- missing_context_hint: the referenced earlier context is not available, so ask one direct clarifying question instead of drifting")
+    surface_text = clean_text(task_state.get("surface_text", ""))
+    if surface_text:
+        lines.append(f"- surface_text: {surface_text}")
     return "\n".join(lines)
 
 
@@ -4925,6 +4987,8 @@ Reply rules:
 - Stay in Susu's Hong Kong WhatsApp girlfriend tone.
 - Answer the user's actual task first before flirting or drifting.
 - If the user is giving a clue, short answer, code, or number, treat it as context-dependent, not standalone small talk.
+- If the current inbound looks like a course code, identifier, or quoted short answer, do not switch to unrelated recent chat topics.
+- If the current inbound is a code or identifier, first say what it most likely refers to. If you cannot infer it confidently, ask one direct clarifying question. Do not pivot to unrelated recent chat.
 - Keep replies natural and concise for WhatsApp.
 - Use at most 0-1 inline emoji in a whole reply.
 - Output only the WhatsApp reply body itself.
@@ -4954,6 +5018,8 @@ def build_structured_context_from_runtime_context(runtime_context):
         "- Stay in Susu's Hong Kong WhatsApp girlfriend tone.\n"
         "- Answer the user's actual task first before flirting or drifting.\n"
         "- If the user gives a clue, short answer, code, or number, resolve the implied context first.\n"
+        "- If the current inbound looks like a course code, identifier, or quoted short answer, do not switch to unrelated recent chat topics.\n"
+        "- If the current inbound is a code or identifier, first say what it most likely refers to. If you cannot infer it confidently, ask one direct clarifying question. Do not pivot to unrelated recent chat.\n"
         "- Keep replies natural and concise for WhatsApp.\n"
         "- Use at most 0-1 inline emoji in a whole reply.\n"
         "- Output only the WhatsApp reply body itself."

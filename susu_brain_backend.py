@@ -14,6 +14,8 @@ BACKEND_TIMEOUT_SECONDS = float(os.environ.get("WA_SUSU_BRAIN_TIMEOUT_SECONDS", 
 RELAY_API_KEY = os.environ.get("WA_RELAY_API_KEY", "").strip()
 RELAY_BASE_URL = os.environ.get("WA_RELAY_BASE_URL", "https://apiapipp.com/v1").strip() or "https://apiapipp.com/v1"
 DEFAULT_MODEL = os.environ.get("WA_SUSU_BRAIN_MODEL", os.environ.get("WA_RELAY_MODEL", "claude-opus-4-6")).strip() or "claude-opus-4-6"
+RELAY_RETRY_COUNT = int(os.environ.get("WA_RELAY_RETRY_COUNT", "2"))
+RELAY_RETRY_BACKOFF_SECONDS = float(os.environ.get("WA_RELAY_RETRY_BACKOFF_SECONDS", "1.0"))
 
 
 def json_bytes(payload):
@@ -146,6 +148,31 @@ def call_relay(messages, temperature=0.8, max_tokens=220, model_name=""):
     return content
 
 
+def should_retry_relay_exception(exc):
+    if isinstance(exc, URLError):
+        return True
+    if isinstance(exc, HTTPError):
+        return exc.code in (408, 409, 425, 429, 500, 502, 503, 504)
+    detail = str(exc)
+    return any(token in detail for token in ["http_502", "http_503", "http_504", "url_error"])
+
+
+def call_relay_with_retry(messages, temperature=0.8, max_tokens=220, model_name=""):
+    attempts = max(RELAY_RETRY_COUNT, 1)
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            return call_relay(messages, temperature=temperature, max_tokens=max_tokens, model_name=model_name)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts - 1 or not should_retry_relay_exception(exc):
+                raise
+            time.sleep(max(RELAY_RETRY_BACKOFF_SECONDS, 0.1) * (attempt + 1))
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("relay_failed_without_error")
+
+
 class BrainHandler(BaseHTTPRequestHandler):
     server_version = "SusuBrainBackend/0.1"
 
@@ -187,7 +214,7 @@ class BrainHandler(BaseHTTPRequestHandler):
         try:
             request_payload = read_json_body(self)
             messages = build_openai_messages(request_payload)
-            reply = call_relay(
+            reply = call_relay_with_retry(
                 messages,
                 temperature=float(request_payload.get("temperature", 0.8)),
                 max_tokens=int(request_payload.get("max_tokens", 220)),
