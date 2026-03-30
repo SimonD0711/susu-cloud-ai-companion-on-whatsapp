@@ -3335,6 +3335,35 @@ def load_session_memories(conn, wa_id, limit=8, bucket=None):
     return items
 
 
+def load_session_memory_rows(conn, wa_id, limit=80):
+    now = hk_now()
+    rows = conn.execute(
+        """
+        SELECT content, observed_at, updated_at, expires_at
+        FROM wa_session_memories
+        WHERE wa_id = ?
+          AND expires_at > ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+        """,
+        (wa_id, now.astimezone(timezone.utc).isoformat(), limit),
+    ).fetchall()
+    items = []
+    for row in rows:
+        content = clean_text(row["content"])
+        if not content:
+            continue
+        items.append(
+            {
+                "content": content,
+                "observed_at": clean_text(row["observed_at"]),
+                "updated_at": clean_text(row["updated_at"]),
+                "bucket": current_recent_bucket(row["observed_at"] or row["updated_at"], now) or "within_7d",
+            }
+        )
+    return items
+
+
 def upsert_session_memory(conn, wa_id, content, bucket="within_7d", ttl_hours=None, observed_at=None, updated_at_text=None):
     text = clean_text(content)
     if not text:
@@ -4645,6 +4674,467 @@ def reminder_loop():
         time.sleep(30)
 
 
+def extract_match_terms(text):
+    value = clean_text(text).lower()
+    if not value:
+        return []
+    terms = []
+    seen = set()
+    for part in re.findall(r"[a-z0-9]{2,}|[\u4e00-\u9fff]{1,}", value):
+        token = part.strip()
+        if not token:
+            continue
+        if len(token) == 1 and not re.fullmatch(r"\d", token):
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        terms.append(token)
+    return terms[:48]
+
+
+def recent_history_text(history_rows, limit=6):
+    rows = history_rows[-limit:] if history_rows else []
+    parts = []
+    for item in rows:
+        body = clean_text(item.get("body") or item.get("content") or "")
+        if not body:
+            continue
+        label = "user" if item.get("direction") == "inbound" or item.get("role") == "user" else "assistant"
+        quote_suffix = format_quote_context_suffix(item) if item.get("direction") == "inbound" or item.get("role") == "user" else ""
+        if quote_suffix:
+            body = f"{quote_suffix} {body}".strip()
+        parts.append(f"{label}: {body}")
+    return "\n".join(parts).strip()
+
+
+def detect_question_like(text):
+    value = clean_text(text).lower()
+    if not value:
+        return False
+    if "?" in value or "？" in value:
+        return True
+    markers = [
+        "why", "what", "which", "who", "where", "when", "how",
+        "点解", "點解", "点样", "點樣", "咩", "乜", "吗", "嗎", "呢", "呀",
+        "係咪", "系咪", "会唔会", "會唔會", "可唔可以",
+        "几", "幾", "邊", "乜嘢",
+    ]
+    return any(marker in value for marker in markers)
+
+
+def extract_reply_surface_text(text):
+    value = clean_text(text)
+    if not value:
+        return ""
+    lines = [clean_text(line) for line in value.splitlines() if clean_text(line)]
+    if not lines:
+        return value
+    for line in reversed(lines):
+        if not line.startswith("[對方呢句係回覆"):
+            return line
+    return lines[-1]
+
+
+def detect_clue_like_input(text):
+    value = extract_reply_surface_text(text)
+    if not value:
+        return False
+    compact = normalize_key(value)
+    if re.fullmatch(r"[a-z]{2,6}\d{2,6}[a-z0-9]*", compact):
+        return True
+    if re.fullmatch(r"\d{1,4}", compact):
+        return True
+    if len(value) <= 20 and any(marker in value.lower() for marker in ["course", "code", "hint"]):
+        return True
+    clue_markers = ["答案", "係", "系", "就係", "就是", "线索", "線索", "估下", "估吓"]
+    return len(value) <= 20 and any(marker in value for marker in clue_markers)
+
+
+def detect_emotional_support(text):
+    value = extract_reply_surface_text(text).lower()
+    if not value:
+        return False
+    markers = [
+        "唔开心", "唔開心", "唔舒服", "唔知点算", "唔知點算", "想喊", "想哭",
+        "好烦", "好煩", "好累", "好攰", "好大压力", "好大壓力", "压力", "壓力",
+        "sad", "upset", "stress", "stressed", "anxious", "anxiety", "depressed",
+    ]
+    return any(marker in value for marker in markers)
+
+
+def build_task_state(history_rows, incoming_text):
+    history_rows = history_rows or []
+    latest_rows = history_rows[-6:]
+    current_text = extract_reply_surface_text(incoming_text)
+    compact = normalize_key(current_text)
+    previous_user = ""
+    previous_assistant = ""
+    latest_question_text = ""
+    for item in reversed(latest_rows):
+        direction = item.get("direction") or ("inbound" if item.get("role") == "user" else "outbound")
+        body = clean_text(item.get("body") or item.get("content") or "")
+        if not body:
+            continue
+        if direction == "outbound" and not previous_assistant:
+            previous_assistant = body
+        if direction == "inbound" and body != current_text and not previous_user:
+            previous_user = body
+        if not latest_question_text and detect_question_like(body):
+            latest_question_text = body
+
+    task_type = "casual_chat"
+    user_intent = "chat naturally and keep the conversation moving"
+    expected_next_move = "reply casually in Susu's tone"
+    confidence = 0.35
+
+    live_search_plan = build_live_search_plan(current_text) or {}
+    if live_search_plan.get("should_search"):
+        task_type = "search_request"
+        user_intent = "wants fresh factual information"
+        expected_next_move = "use grounded search results before replying"
+        confidence = 0.92
+    elif detect_clue_like_input(current_text) and (detect_question_like(previous_assistant) or detect_question_like(previous_user) or latest_question_text):
+        task_type = "guessing_or_clue"
+        user_intent = "is giving a clue or likely answer to an active guessing thread"
+        expected_next_move = "interpret the clue first, then respond as if you understood the implied answer"
+        confidence = 0.9
+    elif len(current_text) <= 20 and (re.fullmatch(r"\d{1,4}", compact) or current_text.lower() in {"yes", "no", "ok", "sure"}):
+        task_type = "followup_answer"
+        user_intent = "is answering the previous question with a short follow-up"
+        expected_next_move = "resolve the missing context from recent history instead of treating this as standalone small talk"
+        confidence = 0.82
+    elif detect_emotional_support(current_text):
+        task_type = "emotional_support"
+        user_intent = "needs comfort, empathy, or reassurance"
+        expected_next_move = "respond with empathy first, then lightly follow up"
+        confidence = 0.78
+    elif detect_question_like(current_text):
+        task_type = "question_answering"
+        user_intent = "is asking for an answer or explanation"
+        expected_next_move = "answer the question directly before flirting or drifting"
+        confidence = 0.74
+
+    return {
+        "task_type": task_type,
+        "user_intent": user_intent,
+        "expected_next_move": expected_next_move,
+        "confidence": round(confidence, 2),
+        "previous_user": previous_user,
+        "previous_assistant": previous_assistant,
+        "latest_question_text": latest_question_text,
+    }
+
+
+def score_memory_text(content, query_terms, recent_text, task_state):
+    text = clean_text(content)
+    if not text:
+        return -1
+    score = 0
+    lowered = text.lower()
+    normalized = normalize_key(text)
+    for term in query_terms:
+        if term and term in lowered:
+            score += 5 if len(term) >= 3 else 3
+        compact_term = normalize_key(term)
+        if compact_term and compact_term in normalized:
+            score += 3
+    if recent_text and any(term in lowered for term in extract_match_terms(recent_text)[:10]):
+        score += 2
+    if task_state.get("task_type") in {"guessing_or_clue", "followup_answer"}:
+        if re.search(r"[a-z]{2,6}\d{2,6}", lowered):
+            score += 5
+        if re.search(r"\b\d{1,4}\b", lowered):
+            score += 2
+    if task_state.get("task_type") == "emotional_support" and any(marker in lowered for marker in ["压力", "壓力", "stress", "sad", "唔开心", "唔開心"]):
+        score += 4
+    return score
+
+
+def select_relevant_memories(conn, wa_id, incoming_text, task_state, history_rows, primary_text, long_limit=6, short_limit=5, archive_limit=3):
+    query_text = "\n".join(filter(None, [clean_text(incoming_text), recent_history_text(history_rows, limit=4), task_state.get("latest_question_text", "")]))
+    query_terms = extract_match_terms(query_text)
+    recent_text = recent_history_text(history_rows, limit=6)
+
+    long_rows = load_memories(conn, wa_id)
+    selected_long = []
+    scored_long = []
+    for row in long_rows:
+        content = clean_text(row.get("content", ""))
+        if not content:
+            continue
+        if primary_text and memories_look_duplicated(content, primary_text):
+            continue
+        score = score_memory_text(content, query_terms, recent_text, task_state)
+        if score <= 0:
+            continue
+        scored_long.append((score, content))
+    for _, content in sorted(scored_long, key=lambda item: (-item[0], len(item[1]))):
+        if any(memories_look_duplicated(content, existing) for existing in selected_long):
+            continue
+        selected_long.append(content)
+        if len(selected_long) >= long_limit:
+            break
+
+    session_rows = load_session_memory_rows(conn, wa_id, limit=80)
+    scored_short = []
+    for row in session_rows:
+        content = row["content"]
+        score = score_memory_text(content, query_terms, recent_text, task_state)
+        if row["bucket"] == "within_24h":
+            score += 2
+        elif row["bucket"] == "within_3d":
+            score += 1
+        if score <= 0:
+            continue
+        scored_short.append((score, row))
+    selected_short = []
+    for _, row in sorted(scored_short, key=lambda item: (-item[0], item[1]["updated_at"])):
+        if any(memories_look_duplicated(row["content"], existing["content"]) for existing in selected_short):
+            continue
+        selected_short.append(row)
+        if len(selected_short) >= short_limit:
+            break
+
+    selected_archive = []
+    if should_lookup_archive(incoming_text):
+        archive_rows = load_archived_memory_rows(conn, wa_id, limit=max(archive_limit * 2, 4), query_text=incoming_text)
+        scored_archive = []
+        for row in archive_rows:
+            content = clean_text(row.get("content", ""))
+            score = score_memory_text(content, query_terms, recent_text, task_state)
+            if score <= 0:
+                continue
+            scored_archive.append((score, row))
+        for _, row in sorted(scored_archive, key=lambda item: -item[0]):
+            content = clean_text(row.get("content", ""))
+            if any(memories_look_duplicated(content, existing.get("content", "")) for existing in selected_archive):
+                continue
+            selected_archive.append(row)
+            if len(selected_archive) >= archive_limit:
+                break
+
+    return {
+        "selected_long_term": selected_long,
+        "selected_short_term": selected_short,
+        "selected_archive": selected_archive,
+    }
+
+
+def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
+    settings = get_runtime_settings()
+    primary_text = primary_profile_memory_for_wa(wa_id, settings)
+    history_rows = list(load_recent_messages(conn, wa_id))
+    task_state = build_task_state(history_rows, incoming_text)
+    selected = select_relevant_memories(conn, wa_id, incoming_text, task_state, history_rows, primary_text)
+
+    short_groups = {"within_24h": [], "within_3d": [], "within_7d": []}
+    for row in selected["selected_short_term"]:
+        bucket = normalize_recent_bucket(row.get("bucket")) or "within_7d"
+        short_groups.setdefault(bucket, []).append(row["content"])
+
+    archive_lines = format_archived_memory_lines(selected["selected_archive"], limit=3) if selected["selected_archive"] else []
+
+    image_note = ""
+    if image_inputs:
+        image_descriptions = []
+        for index, item in enumerate(image_inputs[:MAX_IMAGE_ATTACHMENTS], start=1):
+            caption = clean_text(item.get("caption", ""))
+            if caption:
+                image_descriptions.append(f"- image {index} caption: {caption}")
+            else:
+                image_descriptions.append(f"- image {index}: no caption")
+        image_note = "Current inbound includes images:\n" + "\n".join(image_descriptions)
+        category_text = " / ".join(image_categories or []) if image_categories else "unknown"
+        image_stats_text = load_image_stats_summary(conn, wa_id)
+        stats_text = f"\nPrevious image categories: {image_stats_text}" if image_stats_text else ""
+        guidance = image_reply_guidance(image_categories)
+        image_note = f"{image_note}\nImage categories: {category_text}{stats_text}\n{guidance}".strip()
+
+    quotable = []
+    for item in history_rows:
+        body = clean_text(item.get("body", ""))
+        msg_id = item.get("message_id", "")
+        if item.get("direction") == "inbound" and msg_id and len(body) > 3:
+            quotable.append((msg_id, body[:40]))
+
+    quote_hint = ""
+    if quotable:
+        quote_lines = [f"[{mid}] {preview}" for mid, preview in quotable[-5:]]
+        quote_hint = (
+            "If you want to send a quoted reply, start the first line with QUOTE:<message_id>, then put the real reply on the next line.\n"
+            "Do not add QUOTE unless it is genuinely useful.\n"
+            "Available quoted targets:\n" + "\n".join(quote_lines)
+        )
+
+    recent_messages = []
+    for item in history_rows:
+        body = clean_text(item.get("body", ""))
+        if not body:
+            continue
+        role = "user" if item.get("direction") == "inbound" else "assistant"
+        try:
+            dt = datetime.fromisoformat(item["created_at"]).astimezone(HK_TZ)
+            time_label = f"[{dt.strftime('%H:%M')}] "
+        except Exception:
+            time_label = ""
+        if role == "user":
+            quote_suffix = format_quote_context_suffix(item)
+            content = f"{time_label}{quote_suffix} {body}".strip() if quote_suffix else f"{time_label}{body}"
+        else:
+            content = body
+        recent_messages.append({"role": role, "content": content, "body": body, "direction": item.get("direction", ""), "message_id": item.get("message_id", "")})
+
+    prompt_user_text = clean_text(incoming_text) or "(The user only sent images without extra text.)"
+    if image_note:
+        prompt_user_text = f"{prompt_user_text}\n\n{image_note}"
+    if quote_hint:
+        prompt_user_text = f"{prompt_user_text}\n\n{quote_hint}"
+
+    persona_block = normalize_runtime_multiline(settings.get("system_persona"), SYSTEM_PERSONA)
+    core_profile_block = build_core_profile_memory_text(primary_text) if primary_text else ""
+    memory_block = {
+        "primary_profile": core_profile_block,
+        "long_term": selected["selected_long_term"],
+        "within_24h": short_groups.get("within_24h", []),
+        "within_3d": short_groups.get("within_3d", []),
+        "within_7d": short_groups.get("within_7d", []),
+        "archive": archive_lines,
+    }
+    return {
+        "profile_name": profile_name,
+        "persona_block": persona_block,
+        "memory_block": memory_block,
+        "recent_history": recent_messages,
+        "quote_context": {"available_quotes": quotable[-5:], "quote_hint": quote_hint},
+        "task_state": task_state,
+        "current_user_text": prompt_user_text,
+        "current_raw_text": clean_text(incoming_text),
+        "image_inputs": image_inputs or [],
+        "image_categories": image_categories or [],
+        "time_style": style_window_text(),
+        "settings": settings,
+    }
+
+
+def format_task_state_block(task_state):
+    if not task_state:
+        return ""
+    lines = [
+        f"- task_type: {task_state.get('task_type', 'casual_chat')}",
+        f"- user_intent: {task_state.get('user_intent', '')}",
+        f"- expected_next_move: {task_state.get('expected_next_move', '')}",
+        f"- confidence: {task_state.get('confidence', 0)}",
+    ]
+    for key in ("latest_question_text", "previous_user", "previous_assistant"):
+        value = clean_text(task_state.get(key, ""))
+        if value:
+            lines.append(f"- {key}: {value}")
+    return "\n".join(lines)
+
+
+def build_legacy_prompt_from_runtime_context(runtime_context):
+    memory_block = runtime_context["memory_block"]
+    history_text = "\n".join(
+        f"{'user' if item['role'] == 'user' else 'susu'}: {item['content']}"
+        for item in runtime_context["recent_history"]
+    ) or "(no recent history)"
+    archive_section = ""
+    if memory_block["archive"]:
+        archive_section = "\n\nArchived memories (only use if the user is clearly asking about older events):\n" + "\n".join(memory_block["archive"])
+    current_user_text = runtime_context["current_user_text"]
+    task_state_text = format_task_state_block(runtime_context["task_state"])
+    return f"""
+You are Susu replying on WhatsApp.
+
+Display name: {runtime_context["profile_name"] or "the user"}
+
+Current task state (high priority, understand this before replying):
+{task_state_text}
+
+Core profile:
+{memory_block["primary_profile"] or "(none)"}
+
+Relevant long-term memories:
+{chr(10).join(memory_block["long_term"]) if memory_block["long_term"] else "(none)"}
+
+Relevant recent memories within 24h:
+{chr(10).join(memory_block["within_24h"]) if memory_block["within_24h"] else "(none)"}
+
+Relevant recent memories within 3d:
+{chr(10).join(memory_block["within_3d"]) if memory_block["within_3d"] else "(none)"}
+
+Relevant recent memories within 7d:
+{chr(10).join(memory_block["within_7d"]) if memory_block["within_7d"] else "(none)"}{archive_section}
+
+Recent chat history:
+{history_text}
+
+Current inbound message:
+{current_user_text}
+
+Time style:
+{runtime_context["time_style"]}
+
+Reply rules:
+- Stay in Susu's Hong Kong WhatsApp girlfriend tone.
+- Answer the user's actual task first before flirting or drifting.
+- If the user is giving a clue, short answer, code, or number, treat it as context-dependent, not standalone small talk.
+- Keep replies natural and concise for WhatsApp.
+- Use at most 0-1 inline emoji in a whole reply.
+- Output only the WhatsApp reply body itself.
+""".strip()
+
+
+def build_structured_context_from_runtime_context(runtime_context):
+    memory_block = runtime_context["memory_block"]
+    system_parts = [
+        runtime_context["persona_block"],
+        f"Display name: {runtime_context['profile_name'] or 'the user'}",
+        "Current task state:\n" + format_task_state_block(runtime_context["task_state"]),
+    ]
+    if memory_block["primary_profile"]:
+        system_parts.append("Core profile:\n" + memory_block["primary_profile"])
+    system_parts.append("Relevant long-term memories:\n" + ("\n".join(memory_block["long_term"]) if memory_block["long_term"] else "(none)"))
+    system_parts.append("Relevant recent memories within 24h:\n" + ("\n".join(memory_block["within_24h"]) if memory_block["within_24h"] else "(none)"))
+    system_parts.append("Relevant recent memories within 3d:\n" + ("\n".join(memory_block["within_3d"]) if memory_block["within_3d"] else "(none)"))
+    system_parts.append("Relevant recent memories within 7d:\n" + ("\n".join(memory_block["within_7d"]) if memory_block["within_7d"] else "(none)"))
+    if memory_block["archive"]:
+        system_parts.append("Relevant archived memories:\n" + "\n".join(memory_block["archive"]))
+    system_parts.append("Time style:\n" + runtime_context["time_style"])
+    if runtime_context["quote_context"]["quote_hint"]:
+        system_parts.append(runtime_context["quote_context"]["quote_hint"])
+    system_parts.append(
+        "Reply rules:\n"
+        "- Stay in Susu's Hong Kong WhatsApp girlfriend tone.\n"
+        "- Answer the user's actual task first before flirting or drifting.\n"
+        "- If the user gives a clue, short answer, code, or number, resolve the implied context first.\n"
+        "- Keep replies natural and concise for WhatsApp.\n"
+        "- Use at most 0-1 inline emoji in a whole reply.\n"
+        "- Output only the WhatsApp reply body itself."
+    )
+
+    messages = []
+    for item in runtime_context["recent_history"]:
+        content = item["content"]
+        messages.append({"role": item["role"], "content": content})
+
+    current_content_text = runtime_context["current_user_text"]
+    if runtime_context["image_inputs"]:
+        current_content = [{"type": "text", "text": current_content_text}]
+        for img_item in runtime_context["image_inputs"][:MAX_IMAGE_ATTACHMENTS]:
+            current_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{img_item['mime_type']};base64,{img_item['data_b64']}"},
+                }
+            )
+        messages.append({"role": "user", "content": current_content})
+    else:
+        messages.append({"role": "user", "content": current_content_text})
+    return "\n\n".join(system_parts), messages
+
+
 def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
     settings = get_runtime_settings()
     primary_text = primary_profile_memory_for_wa(wa_id, settings)
@@ -4765,6 +5255,17 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
 - emoji 只係偶爾點綴，通常成段 0 到 1 個；唔好每句都帶表情
 - 直接输出苏苏要发畀对方嘅 WhatsApp 内容本身，唔好加说明{quote_hint}
 """.strip()
+
+def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
+    runtime_context = build_runtime_context(
+        conn,
+        wa_id,
+        profile_name,
+        incoming_text,
+        image_inputs=image_inputs,
+        image_categories=image_categories,
+    )
+    return build_legacy_prompt_from_runtime_context(runtime_context)
 
 
 def should_use_sillytavern_brain(wa_id, incoming_text, image_inputs=None):
@@ -4925,7 +5426,7 @@ def build_structured_context_payload(conn, wa_id, profile_name, incoming_text, i
 
 
 def build_sillytavern_request_payload(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
-    system_content, messages = build_structured_context_payload(
+    runtime_context = build_runtime_context(
         conn,
         wa_id,
         profile_name,
@@ -4933,6 +5434,7 @@ def build_sillytavern_request_payload(conn, wa_id, profile_name, incoming_text, 
         image_inputs=image_inputs,
         image_categories=image_categories,
     )
+    system_content, messages = build_structured_context_from_runtime_context(runtime_context)
     payload = {
         "messages": [{"role": "system", "content": system_content}] + messages,
         "temperature": 0.8,
@@ -5483,6 +5985,15 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
     effective_text = incoming_text
     if sleep_boundary:
         effective_text = clean_text(incoming_text) + "\n[記住：對方講過夜晚唔鍾意被催瞓，除非佢主動叫你哄佢瞓。]"
+    runtime_context = build_runtime_context(
+        conn,
+        wa_id,
+        profile_name,
+        effective_text,
+        image_inputs=image_inputs,
+        image_categories=image_categories,
+    )
+    legacy_prompt = build_legacy_prompt_from_runtime_context(runtime_context)
 
     try:
         if use_sillytavern:
@@ -5496,7 +6007,7 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
             )
         else:
             primary_reply = generate_model_text(
-                build_prompt(conn, wa_id, profile_name, effective_text, image_inputs=image_inputs, image_categories=image_categories),
+                legacy_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 image_inputs=image_inputs,
@@ -5505,7 +6016,7 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
         if not BRAIN_FALLBACK_ON_ERROR:
             raise
         primary_reply = generate_model_text(
-            build_prompt(conn, wa_id, profile_name, effective_text, image_inputs=image_inputs, image_categories=image_categories),
+            legacy_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
             image_inputs=image_inputs,
