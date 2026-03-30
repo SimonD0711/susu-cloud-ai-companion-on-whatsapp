@@ -8,12 +8,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from api_server import (
-    ADMIN_NAME,
-    ADMIN_PASSWORD_HASH_B64 as DEFAULT_ADMIN_PASSWORD_HASH_B64,
-    ADMIN_PASSWORD_SALT_B64 as DEFAULT_ADMIN_PASSWORD_SALT_B64,
-    ADMIN_SESSION_SECRET as DEFAULT_ADMIN_SESSION_SECRET,
-    clear_admin_session_cookie,
+from susu_admin_core import (
+    SUSU_PRIMARY_WA_ID,
     create_susu_memory,
     dedupe_primary_long_term_memories,
     delete_susu_memory,
@@ -27,9 +23,10 @@ from api_server import (
 ADMIN_HOST = os.environ.get("SUSU_ADMIN_HOST", "127.0.0.1").strip() or "127.0.0.1"
 ADMIN_PORT = int(os.environ.get("SUSU_ADMIN_PORT", "9001"))
 API_PREFIX = "/api/susu-admin"
-ADMIN_PASSWORD_SALT_B64 = os.environ.get("SUSU_ADMIN_PASSWORD_SALT_B64", DEFAULT_ADMIN_PASSWORD_SALT_B64).strip()
-ADMIN_PASSWORD_HASH_B64 = os.environ.get("SUSU_ADMIN_PASSWORD_HASH_B64", DEFAULT_ADMIN_PASSWORD_HASH_B64).strip()
-ADMIN_SESSION_SECRET = os.environ.get("SUSU_ADMIN_SESSION_SECRET", DEFAULT_ADMIN_SESSION_SECRET).strip()
+ADMIN_NAME = os.environ.get("SUSU_ADMIN_DISPLAY_NAME", "SimonD（站主）").strip() or "SimonD（站主）"
+ADMIN_PASSWORD_SALT_B64 = os.environ.get("SUSU_ADMIN_PASSWORD_SALT_B64", "rj+nNw193+XBQ8+IyFmlUQ==").strip()
+ADMIN_PASSWORD_HASH_B64 = os.environ.get("SUSU_ADMIN_PASSWORD_HASH_B64", "DcUZc6HCEKdOJA215n4LTWcC/SbHknCocktIVbEBtYs=").strip()
+ADMIN_SESSION_SECRET = os.environ.get("SUSU_ADMIN_SESSION_SECRET", "2c80b1f822a936df1d2fe5089abfca25d33964f81059b7f69991873efd35dd99").strip()
 ADMIN_SESSION_COOKIE = os.environ.get("SUSU_ADMIN_SESSION_COOKIE", "susu_admin_session").strip() or "susu_admin_session"
 ADMIN_SESSION_TTL = int(os.environ.get("SUSU_ADMIN_SESSION_TTL", str(60 * 60 * 24 * 30)))
 
@@ -254,7 +251,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == f"{API_PREFIX}/memory/deduplicate":
             wa_id = str(data.get("wa_id", "")).strip()
             try:
-                result = dedupe_primary_long_term_memories(wa_id)
+                result = dedupe_primary_long_term_memories(wa_id or SUSU_PRIMARY_WA_ID)
             except Exception as exc:
                 result = {"ok": False, "detail": str(exc)}
             self._send_json(result, 200 if result.get("ok") else 400)
