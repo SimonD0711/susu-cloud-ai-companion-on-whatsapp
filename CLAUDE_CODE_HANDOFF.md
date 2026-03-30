@@ -222,6 +222,8 @@ Relevant files:
 - `C:\Users\ding7\Documents\gpt-susu-cloud\wa_agent.py`
 - `C:\Users\ding7\Documents\gpt-susu-cloud\sillytavern_adapter.py`
 - `C:\Users\ding7\Documents\gpt-susu-cloud\sillytavern_bridge_server.py`
+- `C:\Users\ding7\Documents\gpt-susu-cloud\susu_brain_backend.py`
+- `C:\Users\ding7\Documents\gpt-susu-cloud\susu-brain-backend.service`
 - `C:\Users\ding7\Documents\gpt-susu-cloud\sillytavern-bridge.service`
 - `C:\Users\ding7\Documents\gpt-susu-cloud\SILLYTAVERN_BRIDGE.md`
 
@@ -239,6 +241,7 @@ What was added:
 - a structured multi-turn context payload builder for the SillyTavern path
 - a local bridge server that exposes an OpenAI-style `/v1/chat/completions` endpoint
 - a bridge service file so Tokyo can run the bridge as a separate process
+- a local pure backend service that accepts Agnai-style structured payloads and calls the relay model
 
 New env vars already supported in code:
 
@@ -257,6 +260,11 @@ New env vars already supported in code:
 - `WA_ST_BRIDGE_UPSTREAM_MODEL`
 - `WA_ST_BRIDGE_TIMEOUT_SECONDS`
 - `WA_ST_BRIDGE_UPSTREAM_AUTH_HEADER`
+- `WA_SUSU_BRAIN_HOST`
+- `WA_SUSU_BRAIN_PORT`
+- `WA_SUSU_BRAIN_API_KEY`
+- `WA_SUSU_BRAIN_TIMEOUT_SECONDS`
+- `WA_SUSU_BRAIN_MODEL`
 
 Current default behavior:
 

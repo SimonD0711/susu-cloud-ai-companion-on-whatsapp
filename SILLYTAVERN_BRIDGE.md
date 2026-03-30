@@ -33,6 +33,13 @@ Bridge service:
 - `WA_ST_BRIDGE_UPSTREAM_API_KEY=<upstream secret if needed>`
 - `WA_ST_BRIDGE_UPSTREAM_MODEL=<optional default model>`
 
+Local pure backend service:
+
+- `WA_SUSU_BRAIN_HOST=127.0.0.1`
+- `WA_SUSU_BRAIN_PORT=9103`
+- `WA_SUSU_BRAIN_API_KEY=<local backend secret>`
+- `WA_SUSU_BRAIN_MODEL=claude-opus-4-6`
+
 ## Upstream expectation
 
 For `WA_ST_BRIDGE_UPSTREAM_MODE=openai`, the upstream should accept an OpenAI-style `chat/completions` payload with:
@@ -57,6 +64,10 @@ This makes the bridge compatible with:
 - OpenAI-compatible proxy layers
 - a future custom structured-chat backend
 
+The repo now also includes a minimal local pure backend service, `susu_brain_backend.py`, which accepts that Agnai-style payload and calls the existing relay model. This gives Tokyo a browser-free end-to-end chain:
+
+`wa_agent.py -> Susu brain bridge -> Susu brain backend -> relay model`
+
 ## Deployment outline
 
 1. Copy `sillytavern_bridge_server.py` to Tokyo
@@ -64,7 +75,11 @@ This makes the bridge compatible with:
 3. Add `WA_ST_BRIDGE_*` env vars to `/etc/wa-agent.env`
 4. `systemctl daemon-reload`
 5. `systemctl enable --now sillytavern-bridge.service`
-6. Point `WA_SILLYTAVERN_API_URL` to the local bridge endpoint
+6. Copy `susu_brain_backend.py` and `susu-brain-backend.service`
+7. `systemctl enable --now susu-brain-backend.service`
+8. Point `WA_ST_BRIDGE_UPSTREAM_MODE=agnai`
+9. Point `WA_ST_BRIDGE_UPSTREAM_URL` to the local backend endpoint
+10. Point `WA_SILLYTAVERN_API_URL` to the local bridge endpoint
 
 ## Current safety model
 
