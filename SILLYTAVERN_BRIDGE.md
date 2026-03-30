@@ -1,4 +1,4 @@
-# SillyTavern Bridge
+# Susu Brain Bridge
 
 This bridge is the Phase 2 runtime layer between `wa_agent.py` and a structured chat backend.
 
@@ -28,22 +28,32 @@ Bridge service:
 - `WA_ST_BRIDGE_HOST=127.0.0.1`
 - `WA_ST_BRIDGE_PORT=9102`
 - `WA_ST_BRIDGE_API_KEY=<local bridge secret>`
-- `WA_ST_BRIDGE_UPSTREAM_URL=<ChatBridge or OpenAI-compatible endpoint>`
+- `WA_ST_BRIDGE_UPSTREAM_MODE=<agnai|openai>`
+- `WA_ST_BRIDGE_UPSTREAM_URL=<Agnai-style backend or OpenAI-compatible endpoint>`
 - `WA_ST_BRIDGE_UPSTREAM_API_KEY=<upstream secret if needed>`
 - `WA_ST_BRIDGE_UPSTREAM_MODEL=<optional default model>`
 
 ## Upstream expectation
 
-The upstream should accept an OpenAI-style `chat/completions` payload with:
+For `WA_ST_BRIDGE_UPSTREAM_MODE=openai`, the upstream should accept an OpenAI-style `chat/completions` payload with:
 
 - `messages`
 - `temperature`
 - `max_tokens`
 - optional `model`
 
+For `WA_ST_BRIDGE_UPSTREAM_MODE=agnai`, the bridge will translate the OpenAI-style request from `wa_agent.py` into an Agnai-style structured payload containing:
+
+- `system_prompt`
+- `conversation`
+- `latest_user_message`
+- `temperature`
+- `max_tokens`
+- optional `model`
+
 This makes the bridge compatible with:
 
-- SillyTavern ChatBridge
+- an Agnai-style pure backend
 - OpenAI-compatible proxy layers
 - a future custom structured-chat backend
 

@@ -233,7 +233,7 @@ Current local commit:
 What was added:
 
 - a new switchable `brain provider` concept
-- a minimal HTTP adapter for a SillyTavern bridge endpoint
+- a minimal HTTP adapter for a bridge-backed brain endpoint
 - a guarded path so only ordinary text chat is eligible for SillyTavern
 - fallback to the legacy Opus path if SillyTavern fails
 - a structured multi-turn context payload builder for the SillyTavern path
@@ -287,9 +287,11 @@ The bridge is intentionally generic.
 
 It can sit in front of:
 
-- SillyTavern ChatBridge
+- an Agnai-style backend
 - another OpenAI-compatible backend
 - a future custom structured-chat service
+
+SQLite remains the single runtime source of truth. The backend is expected to consume structured context only, and must not take ownership of `wa_messages`, `wa_reminders`, or other business tables.
 
 ## 8. Why Not Replace The Whole Runtime
 

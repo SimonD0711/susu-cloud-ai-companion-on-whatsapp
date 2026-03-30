@@ -80,9 +80,6 @@ YOUTUBE_API_KEY = os.environ.get("WA_YOUTUBE_API_KEY", "")
 REDDIT_USER_AGENT = os.environ.get("WA_REDDIT_USER_AGENT", "SusuCloud/1.0")
 
 ADMIN_WA_ID = os.environ.get("WA_ADMIN_WA_ID", "85259576670")
-CLAUDE_WA_ID = os.environ.get("WA_CLAUDE_WA_ID", "8618704499898")
-CLAUDE_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-CLAUDE_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://apiapipp.com")
 
 # 安全詞
 MAX_IMAGE_ATTACHMENTS = int(os.environ.get("WA_MAX_IMAGE_ATTACHMENTS", "3"))
@@ -3353,6 +3350,8 @@ def load_session_memory_rows(conn, wa_id, limit=80):
         content = clean_text(row["content"])
         if not content:
             continue
+        if content.startswith("對方啱啱問過："):
+            continue
         items.append(
             {
                 "content": content,
@@ -4449,160 +4448,6 @@ def pick_susu_reaction(text, night_mode=False):
 
 
 
-def run_claude_code_streaming(task, wa_id, working_dir="/var/www/html"):
-    env = os.environ.copy()
-    env["ANTHROPIC_API_KEY"] = CLAUDE_API_KEY
-    env["ANTHROPIC_BASE_URL"] = CLAUDE_BASE_URL
-
-    def _susu_line(phase, task_desc):
-        import random
-        phrases = {
-            "start": [
-                f"好，我幫你搞緊「{task_desc[:30]}」，等我一陣～",
-                f"唔使擔心，我依家幫你處理喇！",
-                f"收到！你等我喇 bb～",
-            ],
-            "done": [
-                "搞掂咗！你睇下有冇問題呀～",
-                "完成咗！係咁樣㗎，你望一望先",
-                "好啦，搞好咗喇，你快啲睇吓～",
-            ],
-        }
-        prompt = (
-            f"你係蘇蘇，18歲香港女仔，係對方嘅女友。"
-            f"請用一句自然口吻講：{'任務開始：' if phase == 'start' else '任務完成。'}"
-            f"任務內容：{task_desc[:40]}。只輸出那句話。"
-        )
-        try:
-            result = generate_model_text(prompt, temperature=0.9, max_tokens=50)
-            if result and len(result.strip()) > 3:
-                return result.strip()
-        except Exception:
-            pass
-        return random.choice(phrases.get(phase, ["..."]))
-
-    def _send_update(text):
-        try:
-            resp = send_whatsapp_text(wa_id, text)
-            # Store in DB so load_pending_inbound_batch sees a newer outbound
-            try:
-                _conn = get_db()
-                _conn.execute(
-                    """
-                    INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at)
-                    VALUES (?, 'outbound', ?, 'claude_code', ?, ?, ?)
-                    """,
-                    (
-                        wa_id,
-                        (resp.get("messages") or [{}])[0].get("id", ""),
-                        text,
-                        __import__("json").dumps(resp, ensure_ascii=False),
-                        utc_now(),
-                    ),
-                )
-                _conn.commit()
-                _conn.close()
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def _stream():
-        import json as _json
-        try:
-            cmd = (
-                f"ANTHROPIC_API_KEY={shlex.quote(env['ANTHROPIC_API_KEY'])} "
-                f"ANTHROPIC_BASE_URL={shlex.quote(env['ANTHROPIC_BASE_URL'])} "
-                f"HOME=/home/claude-runner "
-                f"claude -p {shlex.quote(task)} --dangerously-skip-permissions "
-                f"--output-format stream-json --verbose"
-            )
-            proc = subprocess.Popen(
-                ["sudo", "-u", "claude-runner", "bash", "-c", cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                cwd=working_dir,
-            )
-
-            TOOL_LABELS = {
-                "Bash": "🖥️ 執行",
-                "Read": "📖 讀取",
-                "Write": "✍️ 寫入",
-                "Edit": "✏️ 編輯",
-                "Glob": "🔍 搜尋",
-                "Grep": "🔎 搜尋",
-                "WebFetch": "🌐 請求",
-                "WebSearch": "🌐 搜尋",
-            }
-
-            last_sent_text = ""
-
-            def _send_update_once(text):
-                nonlocal last_sent_text
-                clean = (text or "").strip()
-                if not clean or clean == last_sent_text:
-                    return
-                _send_update(clean)
-                last_sent_text = clean
-
-            final_result = ""
-            for raw_line in proc.stdout:
-                raw_line = raw_line.strip()
-                if not raw_line:
-                    continue
-                try:
-                    ev = _json.loads(raw_line)
-                except Exception:
-                    continue
-
-                ev_type = ev.get("type", "")
-
-                # Only send assistant text blocks that contain Chinese (meaningful updates)
-                if ev_type == "assistant":
-                    for blk in (ev.get("message") or {}).get("content") or []:
-                        if blk.get("type") == "text":
-                            txt = blk.get("text", "").strip()
-                            if txt and any("\u4e00" <= c <= "\u9fff" for c in txt):
-                                _send_update_once(txt)
-
-                # Final result
-                elif ev_type == "result":
-                    final_result = ev.get("result") or ""
-
-            proc.wait()
-
-            if final_result.strip():
-                # Send in chunks if long
-                chunk_size = 1000
-                text = final_result.strip()
-                while text:
-                    _send_update_once(text[:chunk_size])
-                    text = text[chunk_size:]
-
-            # Save task summary to session memory
-            try:
-                summary_prompt = (
-                    "用一句話（中文）總結剛剛完成的任務，格式：[工作模式] 完成咗：...\n"
-                    f"任務：{task[:100]}\n"
-                    f"結果摘要：{final_result[:300]}\n"
-                    "只輸出那一句話。"
-                )
-                summary = generate_model_text(summary_prompt, temperature=0.2, max_tokens=60)
-                if summary and summary.strip():
-                    _conn = get_db()
-                    upsert_session_memory(_conn, wa_id, summary.strip(), bucket="within_7d", ttl_hours=72)
-                    _conn.close()
-            except Exception:
-                pass
-
-        except Exception as exc:
-            _send_update_once(f"出咗啲問題：{exc}")
-            return
-
-    threading.Thread(target=_stream, daemon=True).start()
-
-
 def _is_reminder_task(text):
     prompt = f"""判斷以下訊息係咪設定提醒嘅請求（例如「6點提醒我開會」「remind me at 9am」）。
 只回答 YES 或 NO。
@@ -5275,11 +5120,13 @@ def should_use_sillytavern_brain(wa_id, incoming_text, image_inputs=None):
         return False
     if image_inputs:
         return False
-    if wa_id == CLAUDE_WA_ID:
-        return False
-    if build_live_search_plan(incoming_text).get("should_search"):
+    if (build_live_search_plan(incoming_text) or {}).get("should_search"):
         return False
     return True
+
+
+def should_use_bridge_brain(wa_id, incoming_text, image_inputs=None):
+    return should_use_sillytavern_brain(wa_id, incoming_text, image_inputs=image_inputs)
 
 
 def build_structured_context_payload(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
@@ -5445,6 +5292,17 @@ def build_sillytavern_request_payload(conn, wa_id, profile_name, incoming_text, 
     return payload
 
 
+def build_bridge_request_payload(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
+    return build_sillytavern_request_payload(
+        conn,
+        wa_id,
+        profile_name,
+        incoming_text,
+        image_inputs=image_inputs,
+        image_categories=image_categories,
+    )
+
+
 def generate_sillytavern_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
     payload = build_sillytavern_request_payload(
         conn,
@@ -5459,6 +5317,17 @@ def generate_sillytavern_reply(conn, wa_id, profile_name, incoming_text, image_i
         SILLYTAVERN_API_KEY,
         payload,
         timeout=max(SILLYTAVERN_TIMEOUT_SECONDS, 5.0),
+    )
+
+
+def generate_bridge_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
+    return generate_sillytavern_reply(
+        conn,
+        wa_id,
+        profile_name,
+        incoming_text,
+        image_inputs=image_inputs,
+        image_categories=image_categories,
     )
 
 
@@ -5785,53 +5654,44 @@ def process_pending_replies_for_contact(wa_id):
 
             reply_text = None
             skip_generate = False
-            if wa_id == CLAUDE_WA_ID and not image_inputs:
-                latest_version, _, _ = get_reply_worker_snapshot(wa_id)
-                if latest_version != target_version or get_latest_inbound_id(conn, wa_id) != batch_last_id:
-                    if typing_stop:
-                        typing_stop.set()
-                    continue
-                run_claude_code_streaming(last_body, wa_id)
-                skip_generate = True
-            else:
-                reply_proc = None
-                try:
-                    reply_proc = spawn_reply_generation_subprocess(
-                        wa_id,
-                        profile_name,
-                        combined_text,
-                        image_inputs=image_inputs,
-                        image_categories=image_categories,
-                    )
-                except Exception as exc:
-                    reply_text = "我啱啱個腦有啲卡住咗，等我緩一緩先再同你傾，好唔好？"
-                    log_outbound_error(conn, wa_id, "model_failed", exc)
-                    if typing_stop:
-                        typing_stop.set()
-                    continue
+            reply_proc = None
+            try:
+                reply_proc = spawn_reply_generation_subprocess(
+                    wa_id,
+                    profile_name,
+                    combined_text,
+                    image_inputs=image_inputs,
+                    image_categories=image_categories,
+                )
+            except Exception as exc:
+                reply_text = "我啱啱個腦有啲卡住咗，等我緩一緩先再同你傾，好唔好？"
+                log_outbound_error(conn, wa_id, "model_failed", exc)
+                if typing_stop:
+                    typing_stop.set()
+                continue
 
-                superseded = False
-                while reply_proc.poll() is None:
-                    touch_reply_worker_heartbeat(wa_id)
-                    latest_version, latest_profile_name, _ = get_reply_worker_snapshot(wa_id)
-                    if latest_profile_name:
-                        profile_name = latest_profile_name
-                    if latest_version != target_version or get_latest_inbound_id_for_wa(wa_id) != batch_last_id:
-                        superseded = True
-                        break
-                    time.sleep(max(REPLY_JOB_POLL_SECONDS, 0.01))
+            superseded = False
+            while reply_proc.poll() is None:
+                touch_reply_worker_heartbeat(wa_id)
+                latest_version, latest_profile_name, _ = get_reply_worker_snapshot(wa_id)
+                if latest_profile_name:
+                    profile_name = latest_profile_name
+                if latest_version != target_version or get_latest_inbound_id_for_wa(wa_id) != batch_last_id:
+                    superseded = True
+                    break
+                time.sleep(max(REPLY_JOB_POLL_SECONDS, 0.01))
 
-                if superseded:
-                    terminate_reply_generation_subprocess(reply_proc)
-                    if typing_stop:
-                        typing_stop.set()
-                    continue
+            if superseded:
+                terminate_reply_generation_subprocess(reply_proc)
+                if typing_stop:
+                    typing_stop.set()
+                continue
 
-                try:
-                    reply_text = read_reply_generation_subprocess_result(reply_proc)
-                except Exception as exc:
-                    reply_text = "我啱啱個腦有啲卡住咗，等我緩一緩先再同你傾，好唔好？"
-                    log_outbound_error(conn, wa_id, "model_failed", exc)
+            try:
+                reply_text = read_reply_generation_subprocess_result(reply_proc)
+            except Exception as exc:
+                reply_text = "我啱啱個腦有啲卡住咗，等我緩一緩先再同你傾，好唔好？"
+                log_outbound_error(conn, wa_id, "model_failed", exc)
 
             if typing_stop:
                 typing_stop.set()
@@ -5840,10 +5700,6 @@ def process_pending_replies_for_contact(wa_id):
             if latest_profile_name:
                 profile_name = latest_profile_name
             if latest_version != target_version or get_latest_inbound_id(conn, wa_id) != batch_last_id:
-                continue
-
-            if skip_generate:
-                record_batch_side_effects(conn, wa_id, profile_name, combined_text, memory_text, image_categories)
                 continue
 
             if reply_text is None:
@@ -5963,8 +5819,8 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
     if live_search_reply:
         return live_search_reply
 
-    use_sillytavern = should_use_sillytavern_brain(wa_id, incoming_text, image_inputs=image_inputs)
-    if not RELAY_API_KEY and not use_sillytavern:
+    use_bridge_brain = should_use_bridge_brain(wa_id, incoming_text, image_inputs=image_inputs)
+    if not RELAY_API_KEY and not use_bridge_brain:
         return "我啱啱個腦有啲lag lag 地，等我緩一緩先再同你傾，好唔好？"
 
     now = hk_now()
@@ -5996,8 +5852,8 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
     legacy_prompt = build_legacy_prompt_from_runtime_context(runtime_context)
 
     try:
-        if use_sillytavern:
-            primary_reply = generate_sillytavern_reply(
+        if use_bridge_brain:
+            primary_reply = generate_bridge_reply(
                 conn,
                 wa_id,
                 profile_name,
@@ -6103,6 +5959,7 @@ class Handler(BaseHTTPRequestHandler):
                     "time_profile": get_time_profile(),
                     "timezone": "Asia/Hong_Kong",
                     "brain_provider": BRAIN_PROVIDER,
+                    "bridge_brain_enabled": bool(SILLYTAVERN_API_URL),
                     "sillytavern_enabled": bool(SILLYTAVERN_API_URL),
                     "primary_model": relay_primary if RELAY_API_KEY else "",
                     "fallback_model": "",

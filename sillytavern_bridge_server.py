@@ -6,6 +6,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from agnai_backend_adapter import (
+    AgnaiBackendAdapterError,
+    build_backend_brain_payload,
+    call_brain_backend,
+    normalize_brain_reply,
+)
+
 
 BRIDGE_HOST = os.environ.get("WA_ST_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
 BRIDGE_PORT = int(os.environ.get("WA_ST_BRIDGE_PORT", "9102"))
@@ -150,8 +157,27 @@ def ensure_openai_shape(payload):
     raise RuntimeError("upstream_missing_choices")
 
 
+def dispatch_upstream(request_payload):
+    mode = UPSTREAM_MODE.strip().lower()
+    if mode in {"openai", "chatbridge", "sillytavern", ""}:
+        upstream_payload = normalize_chat_payload(request_payload)
+        _, upstream_response = call_upstream(upstream_payload)
+        return ensure_openai_shape(upstream_response)
+    if mode in {"agnai", "agnai_style", "susu_brain"}:
+        brain_payload = build_backend_brain_payload(request_payload)
+        brain_response = call_brain_backend(
+            UPSTREAM_URL,
+            brain_payload,
+            api_key=UPSTREAM_API_KEY,
+            timeout=UPSTREAM_TIMEOUT_SECONDS,
+            auth_header=UPSTREAM_AUTH_HEADER,
+        )
+        return normalize_brain_reply(brain_response, default_model=UPSTREAM_MODEL or "agnai-style-backend")
+    raise RuntimeError(f"unsupported_upstream_mode:{UPSTREAM_MODE}")
+
+
 class BridgeHandler(BaseHTTPRequestHandler):
-    server_version = "SusuSillyTavernBridge/0.1"
+    server_version = "SusuBrainBridge/0.2"
 
     def _send_json(self, status, payload):
         body = json_bytes(payload)
@@ -170,7 +196,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "ok": True,
-                    "service": "sillytavern_bridge",
+                    "service": "susu_brain_bridge",
                     "upstream_mode": UPSTREAM_MODE,
                     "has_bridge_api_key": bool(BRIDGE_API_KEY),
                     "has_upstream_url": bool(UPSTREAM_URL),
@@ -191,12 +217,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         try:
             request_payload = read_json_body(self)
-            upstream_payload = normalize_chat_payload(request_payload)
-            _, upstream_response = call_upstream(upstream_payload)
-            response_payload = ensure_openai_shape(upstream_response)
+            response_payload = dispatch_upstream(request_payload)
             self._send_json(200, response_payload)
         except ValueError as exc:
             status, payload = build_error("bad_request", code="bad_request", status=400, detail=str(exc))
+            self._send_json(status, payload)
+        except AgnaiBackendAdapterError as exc:
+            status, payload = build_error("upstream_failed", code="upstream_failed", status=502, detail=str(exc))
             self._send_json(status, payload)
         except Exception as exc:
             status, payload = build_error("upstream_failed", code="upstream_failed", status=502, detail=str(exc))
@@ -205,7 +232,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
 def main():
     server = ThreadingHTTPServer((BRIDGE_HOST, BRIDGE_PORT), BridgeHandler)
-    print(f"Susu SillyTavern bridge listening on http://{BRIDGE_HOST}:{BRIDGE_PORT}")
+    print(f"Susu brain bridge listening on http://{BRIDGE_HOST}:{BRIDGE_PORT}")
     server.serve_forever()
 
 
