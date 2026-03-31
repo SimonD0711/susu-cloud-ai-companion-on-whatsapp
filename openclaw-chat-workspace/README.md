@@ -8,7 +8,7 @@ An AI-powered WhatsApp companion, now backed by the Brain Bridge architecture.
 - **Task Intelligence**: Enhanced memory retrieval with task-type classification (education, Q&A, emotional support) to prioritize relevant context.
 
 ## Repository Status
-- **Current Branch**: `codex/susu-cloud`
+- **Current Branch**: 
 - **Independent Repo**: Yes (detached from legacy worktrees)
 - **Features**:
   - Q&A Synthesis: Automatically extracts and stores meaningful Q&A turns.
