@@ -267,7 +267,7 @@ def _get_runtime_settings() -> dict:
     from src.wa_agent.db import MemoryDB
     db = MemoryDB()
     conn = db.get_connection()
-    rows = conn.execute("SELECT key, value FROM susu_runtime_settings").fetchall()
+    rows = conn.execute("SELECT key, value FROM wa_susu_settings").fetchall()
     settings = {row["key"]: row["value"] for row in rows}
     defaults = {
         "proactive_enabled": "true",
