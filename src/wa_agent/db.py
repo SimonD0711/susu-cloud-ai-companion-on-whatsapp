@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -60,14 +61,21 @@ class MemoryDB:
     """
 
     def __init__(self, db_path: PathType | str | None = None):
-        self.db_path = Path(db_path) if db_path else None
+        if db_path:
+            self.db_path = Path(db_path)
+        else:
+            env_path = os.environ.get("WA_DB_PATH", "")
+            if env_path:
+                self.db_path = Path(env_path)
+            else:
+                base_dir = os.environ.get("WA_BASE_DIR", "/var/www/html")
+                self.db_path = Path(base_dir) / "wa_agent.db"
         self._conn: Optional[sqlite3.Connection] = None
 
     def connect(self) -> sqlite3.Connection:
         """Get or create the SQLite connection."""
         if self._conn is None:
-            path = str(self.db_path) if self.db_path else ":memory:"
-            self._conn = sqlite3.connect(path, check_same_thread=False)
+            self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
         return self._conn
 
