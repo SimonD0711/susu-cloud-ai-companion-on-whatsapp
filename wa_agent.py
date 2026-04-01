@@ -3158,10 +3158,9 @@ def groq_whisper_transcribe(audio_bytes, mime_type="audio/ogg"):
 
     try:
         req = Request(
-            "https://api.groq.com/openai/v1/audio/transcriptions",
+            "http://127.0.0.1:3002/openai/v1/audio/transcriptions",
             data=body,
             headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
             },
             method="POST",
@@ -3169,11 +3168,9 @@ def groq_whisper_transcribe(audio_bytes, mime_type="audio/ogg"):
         with urlopen(req, timeout=30) as resp:
             raw = resp.read().decode("utf-8")
         data = json.loads(raw)
-        import sys; sys.stderr.write(f"[DEBUG GROQ] response={repr(raw[:200])}\n"); sys.stderr.flush()
         text = (data.get("text") or "").strip()
         return text if text else None
-    except Exception as exc:
-        import sys; sys.stderr.write(f"[DEBUG GROQ] exception={type(exc).__name__}: {exc}\n"); sys.stderr.flush()
+    except Exception:
         return None
 
 
@@ -6235,7 +6232,6 @@ def process_pending_replies_for_contact(wa_id):
 
             has_audio = any(row.get("message_type") == "audio" for row in pending_rows)
             audio_triggered_voice = False
-            import sys; sys.stderr.write(f"[DEBUG] wa_id={wa_id} has_audio={has_audio} combined_text={repr(combined_text[:30] if combined_text else '')} GROQ_API_KEY={bool(GROQ_API_KEY)} ACCESS_TOKEN={bool(ACCESS_TOKEN)}\n"); sys.stderr.flush()
 
             if has_audio and not combined_text and GROQ_API_KEY:
                 for row in pending_rows:
@@ -6249,15 +6245,12 @@ def process_pending_replies_for_contact(wa_id):
                             continue
                     audio_data = raw.get("audio") or {}
                     media_id = audio_data.get("id", "")
-                    import sys; sys.stderr.write(f"[DEBUG] wa_id={wa_id} media_id={repr(media_id)}\n"); sys.stderr.flush()
                     if not media_id:
                         continue
                     audio_obj = fetch_whatsapp_audio(media_id)
-                    import sys; sys.stderr.write(f"[DEBUG] wa_id={wa_id} audio_obj={'fetched' if audio_obj else 'None'}\n"); sys.stderr.flush()
                     if not audio_obj:
                         continue
                     transcript = groq_whisper_transcribe(audio_obj["bytes"], audio_obj["mime_type"])
-                    import sys; sys.stderr.write(f"[DEBUG] wa_id={wa_id} transcript={repr(transcript[:50] if transcript else 'None')}\n"); sys.stderr.flush()
                     if transcript:
                         combined_text = transcript
                         break
