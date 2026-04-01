@@ -6745,8 +6745,12 @@ if __name__ == "__main__":
     if _sys_path not in sys.path:
         sys.path.insert(0, _sys_path)
     try:
-        from src.wa_agent.server import main as _server_main
-        _server_main()
+        if len(sys.argv) > 1 and sys.argv[1] == "--reply-job":
+            from wa_agent import run_reply_generation_job_from_stdio
+            run_reply_generation_job_from_stdio()
+        else:
+            from src.wa_agent.server import main as _server_main
+            _server_main()
     except KeyboardInterrupt:
         pass
     except Exception:
