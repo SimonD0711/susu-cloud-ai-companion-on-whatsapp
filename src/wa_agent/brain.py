@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import re
 from datetime import datetime, timezone
 from typing import Optional
@@ -12,6 +13,11 @@ from src.ai.llm.manager import LLMManager
 
 MAX_INLINE_REPLY_EMOJIS = 1
 PUNCTUATION = "。！？!?~～…"
+
+
+def clean_text(text: str) -> str:
+    """Remove zero-width characters and normalize whitespace."""
+    return re.sub(r"\s+", " ", str(text or "").strip())
 
 
 def is_emoji_base_char(char: str) -> bool:
@@ -117,6 +123,78 @@ def get_time_profile(now: datetime) -> str:
         return "evening"
     else:
         return "late_night"
+
+
+def split_reply_bubbles(reply_text: str, night_mode: bool = False) -> list[str]:
+    """Split a reply into WhatsApp bubbles by punctuation or tokens."""
+    text = normalize_reply(reply_text)
+    if not text:
+        return []
+
+    chunks = [chunk.strip() for chunk in re.split(r"\n+", text) if chunk.strip()]
+    if len(chunks) >= 2:
+        return chunks
+
+    has_punct = any(p in text for p in PUNCTUATION)
+    if has_punct:
+        parts = re.findall(
+            r".+?(?:[。！？!?~～…]+(?:[🥺😭😂😏🤭💕💖💗💘🫶✨😤🤍❤️💛💚💙💜🩷🩵]*\s*)|$)",
+            text,
+        )
+        sentences = [part.strip() for part in parts if part.strip()]
+        if len(sentences) >= 2:
+            return sentences
+
+    tokens = text.split()
+    result = []
+    sentence = tokens[0] if tokens else ""
+    for token in tokens[1:]:
+        if token.endswith("~"):
+            result.append(sentence)
+            sentence = token[:-1]
+        elif len(token) <= 2 and not any("\u4e00" <= c <= "\u9fff" for c in token):
+            sentence = sentence + " " + token
+        else:
+            result.append(sentence)
+            sentence = token
+    if sentence:
+        result.append(sentence)
+    if len(result) >= 2:
+        return result
+
+    return [text]
+
+
+def split_followup_style(bubble: str) -> list[str]:
+    """Split a bubble into followup style bubbles."""
+    text = clean_text(bubble)
+    if len(text) < 9:
+        return [text]
+
+    splitters = ["～ ", "~ ", "🥺 ", "🥺", "。", "！", "？", "!", "?"]
+    for mark in splitters:
+        idx = text.find(mark)
+        if idx != -1 and idx + len(mark) < len(text):
+            first = text[: idx + len(mark)].strip()
+            second = text[idx + len(mark) :].strip()
+            if len(first) >= 3 and len(second) >= 4:
+                return [first, second]
+
+    return [text]
+
+
+def maybe_stage_followup_bubbles(bubbles: list[str], night_mode: bool = False) -> list[str]:
+    """Stage followup bubbles with some probability."""
+    staged = [clean_text(item) for item in bubbles if clean_text(item)]
+    if not staged:
+        return []
+
+    chance = 0.55 if night_mode else 0.4
+    if len(staged) == 1 and random.random() < chance:
+        followup = split_followup_style(staged[0])
+        if len(followup) >= 2:
+            return followup[:3]
+    return staged
 
 
 class ReplyBrain:
