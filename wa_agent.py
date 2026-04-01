@@ -3169,9 +3169,11 @@ def groq_whisper_transcribe(audio_bytes, mime_type="audio/ogg"):
         with urlopen(req, timeout=30) as resp:
             raw = resp.read().decode("utf-8")
         data = json.loads(raw)
+        import sys; sys.stderr.write(f"[DEBUG GROQ] response={repr(raw[:200])}\n"); sys.stderr.flush()
         text = (data.get("text") or "").strip()
         return text if text else None
-    except Exception:
+    except Exception as exc:
+        import sys; sys.stderr.write(f"[DEBUG GROQ] exception={type(exc).__name__}: {exc}\n"); sys.stderr.flush()
         return None
 
 
