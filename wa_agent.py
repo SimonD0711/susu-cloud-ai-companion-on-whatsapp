@@ -6854,23 +6854,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--reply-job":
-        try:
-            run_reply_generation_job_from_stdio()
-            sys.exit(0)
-        except Exception:
-            traceback.print_exc(file=sys.stderr)
-            try:
-                sys.stdout.write(json.dumps({"ok": False, "error": traceback.format_exc()}, ensure_ascii=False))
-                sys.stdout.flush()
-            except Exception:
-                pass
-            sys.exit(1)
-
-    bootstrap_conn = get_db()
-    bootstrap_conn.close()
-    threading.Thread(target=proactive_loop, name="wa-proactive-loop", daemon=True).start()
-    threading.Thread(target=reminder_loop, name="wa-reminder-loop", daemon=True).start()
-    threading.Thread(target=pending_reply_recovery_loop, name="wa-reply-recovery-loop", daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", 9100), Handler)
-    server.serve_forever()
+    import sys
+    from pathlib import Path as _Path
+    _sys_path = str(_Path(__file__).resolve().parent.parent / "src")
+    if _sys_path not in sys.path:
+        sys.path.insert(0, _sys_path)
+    try:
+        from src.wa_agent.server import main as _server_main
+        _server_main()
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
