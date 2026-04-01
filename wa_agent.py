@@ -23,7 +23,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
-from brain_adapter import BrainBridgeError, call_brain_bridge
 
 try:
     from zoneinfo import ZoneInfo
@@ -43,15 +42,6 @@ TYPING_INDICATOR_DELAY_SECONDS = float(os.environ.get("WA_TYPING_INDICATOR_DELAY
 TYPING_INDICATOR_REFRESH_SECONDS = float(os.environ.get("WA_TYPING_INDICATOR_REFRESH_SECONDS", "4.0"))
 REPLY_JOB_POLL_SECONDS = float(os.environ.get("WA_REPLY_JOB_POLL_SECONDS", "0.05"))
 REPLY_JOB_TERMINATE_GRACE_SECONDS = float(os.environ.get("WA_REPLY_JOB_TERMINATE_GRACE_SECONDS", "0.25"))
-BRAIN_PROVIDER = os.environ.get("WA_BRAIN_PROVIDER", "legacy").strip().lower() or "legacy"
-BRAIN_FALLBACK_ON_ERROR = os.environ.get("WA_BRAIN_FALLBACK_ON_ERROR", "1").strip().lower() not in {"0", "false", "no", "off"}
-BRAIN_BRIDGE_URL = os.environ.get("WA_BRAIN_BRIDGE_URL", "").strip()
-BRAIN_BRIDGE_KEY = os.environ.get("WA_BRAIN_BRIDGE_KEY", "").strip()
-BRAIN_BRIDGE_MODEL = os.environ.get("WA_BRAIN_BRIDGE_MODEL", "").strip()
-BRAIN_BRIDGE_TIMEOUT = float(os.environ.get("WA_BRAIN_BRIDGE_TIMEOUT", "90"))
-# Per-task model overrides — both default to BRAIN_BRIDGE_MODEL when unset.
-_BRAIN_MODEL_COMPLEX = os.environ.get("WA_BRAIN_MODEL_COMPLEX", "").strip()
-_BRAIN_MODEL_CASUAL = os.environ.get("WA_BRAIN_MODEL_CASUAL", "").strip()
 RELAY_RETRY_COUNT = int(os.environ.get("WA_RELAY_RETRY_COUNT", "2"))
 RELAY_RETRY_BACKOFF_SECONDS = float(os.environ.get("WA_RELAY_RETRY_BACKOFF_SECONDS", "1.0"))
 PROACTIVE_ENABLED = os.environ.get("WA_PROACTIVE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
@@ -5891,84 +5881,6 @@ def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, im
     return build_legacy_prompt_from_runtime_context(runtime_context)
 
 
-def should_use_brain_bridge(wa_id, incoming_text, image_inputs=None):
-    if BRAIN_PROVIDER != "bridge":
-        return False
-    if not BRAIN_BRIDGE_URL:
-        return False
-    if image_inputs:
-        return False
-    if (build_live_search_plan(incoming_text) or {}).get("should_search"):
-        return False
-    return True
-
-
-
-
-
-
-
-def _resolve_bridge_model(task_type):
-    """Return the model name to send to the bridge for the given task_type.
-
-    Falls back to BRAIN_BRIDGE_MODEL (global default) when no task-specific
-    override env var is configured.  Returns empty string if nothing is set,
-    which tells the backend to use its own default model.
-    """
-    complex_types = {"education_schedule_query", "question_answering"}
-    if task_type in complex_types and _BRAIN_MODEL_COMPLEX:
-        return _BRAIN_MODEL_COMPLEX
-    if task_type == "casual_chat" and _BRAIN_MODEL_CASUAL:
-        return _BRAIN_MODEL_CASUAL
-    return BRAIN_BRIDGE_MODEL
-
-
-def build_brain_bridge_payload(
-    conn, wa_id, profile_name, incoming_text,
-    image_inputs=None, image_categories=None,
-    temperature=0.8, max_tokens=220, task_type="casual_chat",
-):
-    runtime_context = build_runtime_context(
-        conn,
-        wa_id,
-        profile_name,
-        incoming_text,
-        image_inputs=image_inputs,
-        image_categories=image_categories,
-    )
-    system_content, messages = build_structured_context_from_runtime_context(runtime_context)
-    payload = {
-        "messages": [{"role": "system", "content": system_content}] + messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    model = _resolve_bridge_model(task_type)
-    if model:
-        payload["model"] = model
-    return payload
-
-def generate_brain_bridge_reply(
-    conn, wa_id, profile_name, incoming_text,
-    image_inputs=None, image_categories=None,
-    temperature=0.8, max_tokens=220, task_type="casual_chat",
-):
-    payload = build_brain_bridge_payload(
-        conn,
-        wa_id,
-        profile_name,
-        incoming_text,
-        image_inputs=image_inputs,
-        image_categories=image_categories,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        task_type=task_type,
-    )
-    return call_brain_bridge(
-        BRAIN_BRIDGE_URL,
-        BRAIN_BRIDGE_KEY,
-        payload,
-        timeout=max(BRAIN_BRIDGE_TIMEOUT, 5.0),
-    )
 
 def is_emoji_base_char(char):
     if not char:
@@ -6576,8 +6488,7 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
     if live_search_reply:
         return live_search_reply
 
-    use_bridge_brain = should_use_brain_bridge(wa_id, incoming_text, image_inputs=image_inputs)
-    if not RELAY_API_KEY and not use_bridge_brain:
+    if not RELAY_API_KEY:
         return "我啱啱個腦有啲lag lag 地，等我緩一緩先再同你傾，好唔好？"
 
     toggle_only = toggle_result != "unchanged"
@@ -6617,35 +6528,12 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
     elif task_type == "question_answering":
         max_tokens = max(max_tokens, 260)
 
-    try:
-        if use_bridge_brain:
-            primary_reply = generate_brain_bridge_reply(
-                conn,
-                wa_id,
-                profile_name,
-                effective_text,
-                image_inputs=image_inputs,
-                image_categories=image_categories,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                task_type=task_type,
-            )
-        else:
-            primary_reply = generate_model_text(
-                legacy_prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                image_inputs=image_inputs,
-            )
-    except BrainBridgeError:
-        if not BRAIN_FALLBACK_ON_ERROR:
-            raise
-        primary_reply = generate_model_text(
-            legacy_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            image_inputs=image_inputs,
-        )
+    primary_reply = generate_model_text(
+        legacy_prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        image_inputs=image_inputs,
+    )
 
     reply = shorten_whatsapp_reply(primary_reply, night_mode=night_mode)
 
@@ -6746,9 +6634,6 @@ class Handler(BaseHTTPRequestHandler):
                     "time_mode": "night" if is_night_mode() else "day",
                     "time_profile": get_time_profile(),
                     "timezone": "Asia/Hong_Kong",
-                    "brain_provider": BRAIN_PROVIDER,
-                    "bridge_brain_enabled": bool(BRAIN_BRIDGE_URL),
-                    "bridge_enabled": bool(BRAIN_BRIDGE_URL),
                     "primary_model": relay_primary if RELAY_API_KEY else "",
                     "fallback_model": "",
                     "has_relay_key": bool(RELAY_API_KEY),
@@ -6854,23 +6739,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--reply-job":
-        try:
-            run_reply_generation_job_from_stdio()
-            sys.exit(0)
-        except Exception:
-            traceback.print_exc(file=sys.stderr)
-            try:
-                sys.stdout.write(json.dumps({"ok": False, "error": traceback.format_exc()}, ensure_ascii=False))
-                sys.stdout.flush()
-            except Exception:
-                pass
-            sys.exit(1)
-
-    bootstrap_conn = get_db()
-    bootstrap_conn.close()
-    threading.Thread(target=proactive_loop, name="wa-proactive-loop", daemon=True).start()
-    threading.Thread(target=reminder_loop, name="wa-reminder-loop", daemon=True).start()
-    threading.Thread(target=pending_reply_recovery_loop, name="wa-reply-recovery-loop", daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", 9100), Handler)
-    server.serve_forever()
+    import sys
+    from pathlib import Path as _Path
+    _sys_path = str(_Path(__file__).resolve().parent.parent / "src")
+    if _sys_path not in sys.path:
+        sys.path.insert(0, _sys_path)
+    try:
+        from src.wa_agent.server import main as _server_main
+        _server_main()
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
