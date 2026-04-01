@@ -21,9 +21,14 @@ def utc_now() -> str:
 
 
 def _generate_model_text(prompt: str, temperature: float = 0.0, max_tokens: int = 80) -> str:
-    """Generate text using the brain bridge. Import from brain_adapter at call time."""
-    from brain_adapter import call_brain_bridge
-    return call_brain_bridge(prompt, temperature=temperature, max_tokens=max_tokens)
+    """Generate text using the relay LLM. Import from wa_agent at call time."""
+    import sys
+    from pathlib import Path
+    wa_path = str(Path(__file__).resolve().parent.parent.parent)
+    if wa_path not in sys.path:
+        sys.path.insert(0, wa_path)
+    from wa_agent import generate_model_text
+    return generate_model_text(prompt, temperature=temperature, max_tokens=max_tokens)
 
 
 def _is_reminder_task(text: str) -> bool:

@@ -190,9 +190,14 @@ def proactive_slot_hint(now: Optional[datetime] = None) -> str:
 
 
 def _generate_model_text(prompt: str, temperature: float = 0.72, max_tokens: int = 90) -> str:
-    """Generate text using brain bridge. Import at call time."""
-    from brain_adapter import call_brain_bridge
-    return call_brain_bridge(prompt, temperature=temperature, max_tokens=max_tokens)
+    """Generate text using relay LLM. Import from wa_agent at call time."""
+    import sys
+    from pathlib import Path
+    wa_path = str(Path(__file__).resolve().parent.parent.parent)
+    if wa_path not in sys.path:
+        sys.path.insert(0, wa_path)
+    from wa_agent import generate_model_text
+    return generate_model_text(prompt, temperature=temperature, max_tokens=max_tokens)
 
 
 def split_profile_memory_lines(value: str) -> list[str]:
