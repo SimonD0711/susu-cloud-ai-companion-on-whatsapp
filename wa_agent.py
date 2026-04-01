@@ -77,10 +77,14 @@ MINIMAX_MODEL = os.environ.get("WA_MINIMAX_MODEL", "MiniMax-M2.5")
 MINIMAX_BASE_URL = os.environ.get("WA_MINIMAX_BASE_URL", "https://api.minimaxi.com/v1")
 
 GROQ_API_KEY = os.environ.get("WA_GROQ_API_KEY") or os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = os.environ.get("WA_GROQ_MODEL", "llama-3.3-70b-versatile")
 X_BEARER_TOKEN = os.environ.get("WA_X_BEARER_TOKEN", "")
 YOUTUBE_API_KEY = os.environ.get("WA_YOUTUBE_API_KEY", "")
 REDDIT_USER_AGENT = os.environ.get("WA_REDDIT_USER_AGENT", "SusuCloud/1.0")
+BING_API_KEY = os.environ.get("WA_BING_API_KEY", "")
+OPENWEATHER_API_KEY = os.environ.get("WA_OPENWEATHER_API_KEY", "")
+SPOTIFY_CLIENT_ID = os.environ.get("WA_SPOTIFY_CLIENT_ID", "")
+SPOTIFY_CLIENT_SECRET = os.environ.get("WA_SPOTIFY_CLIENT_SECRET", "")
+TAVILY_API_KEY = os.environ.get("WA_TAVILY_API_KEY", "")
 
 ADMIN_WA_ID = os.environ.get("WA_ADMIN_WA_ID", "85259576670")
 
@@ -119,6 +123,91 @@ TODAY_WEATHER_HINTS = ("今日", "今天", "而家", "依家", "宜家", "現在
 TOMORROW_WEATHER_HINTS = ("聽日", "听日", "明日", "明天", "tomorrow")
 DAY_AFTER_TOMORROW_WEATHER_HINTS = ("後日", "后日", "大後日", "大后日")
 HK_DEFAULT_LOCATION_HINTS = ("香港", "hk", "hong kong")
+# Voice mode constants
+VOICE_MODE_TRIGGERS = (
+    "想听你的声音", "用语音回复", "讲语音", "语音模式", "我想听你讲野",
+    "粤语mode", "voice mode", "cantonese voice", "語音模式", "用語音回覆",
+    "想听你讲野", "想听你讲", "用语音讲", "讲比你听", "想听你讲嘢",
+    "粤语 voice", "cantonese voice", "voice回复", "voice mode",
+)
+VOICE_MODE_OFF_TRIGGERS = (
+    "唔好语音了", "关掉语音", "不用语音了", "取消语音", "文字模式",
+    "stop voice", "voice off", "turn off voice",
+    "关掉voice", "关voice", "停止语音", "关语音模式", "退出语音",
+    "关语音啦", "停语音", "唔好voice", "停voice", "关闭语音模式",
+)
+
+def is_voice_mode_enabled(conn, wa_id):
+    if not conn or not wa_id:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT content FROM wa_memories WHERE wa_id=? AND memory_key=? LIMIT 1",
+            (wa_id, "voice_mode")
+        ).fetchone()
+        return bool(row and row[0] == "on")
+    except Exception:
+        return False
+
+def set_voice_mode(conn, wa_id, enabled=True):
+    if not conn or not wa_id:
+        return False
+    now = utc_now()
+    try:
+        conn.execute(
+            "INSERT INTO wa_memories (wa_id, kind, content, memory_key, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(wa_id, memory_key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at",
+            (wa_id, "setting", "on" if enabled else "off", "voice_mode", now, now),
+        )
+        conn.commit()
+    except Exception:
+        return False
+    return True
+
+def check_and_toggle_voice_mode(conn, wa_id, text):
+    """Returns 'enabled', 'disabled', or 'unchanged'."""
+    if not text:
+        return "unchanged"
+    for trigger in VOICE_MODE_OFF_TRIGGERS:
+        if trigger in text:
+            try:
+                success = set_voice_mode(conn, wa_id, False)
+                if success:
+                    conn.commit()
+                    return "disabled"
+            except Exception:
+                pass
+            return "unchanged"
+    for trigger in VOICE_MODE_TRIGGERS:
+        if trigger in text:
+            try:
+                success = set_voice_mode(conn, wa_id, True)
+                if success:
+                    conn.commit()
+                    return "enabled"
+            except Exception:
+                pass
+            return "unchanged"
+    return "unchanged"
+
+
+def _is_toggle_only_message(text):
+    """True if text consists only of a voice mode trigger/off trigger (with minimal surrounding chars)."""
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    for trigger in VOICE_MODE_OFF_TRIGGERS:
+        if trigger in stripped and len(stripped) <= len(trigger) + 4:
+            return True
+    for trigger in VOICE_MODE_TRIGGERS:
+        if trigger in stripped and len(stripped) <= len(trigger) + 4:
+            return True
+    return False
+
+
 EXPLICIT_SEARCH_HINTS = (
     "幫我查", "幫我搵", "查下", "查吓", "查一查", "搜尋", "搜索",
     "search", "lookup", "google", "上網", "網上", "online search",
@@ -301,6 +390,10 @@ SYSTEM_PERSONA = textwrap.dedent(
     - 偏好用「嘻嘻」，唔好用「hehe」。
     - emoji 只係偶爾點綴就夠，通常成段 0 到 1 個；唔好每句都加 emoji。
     - 唔好提自己係 AI、模型、系統、prompt、政策。
+
+    【語音模式】
+    語音模式係一個你可以用語音回覆嘅功能，唔需要任何特別操作。
+    當然可以語音回覆啊，鐘意嘅就發語音啦，唔需要提任何操作指令。
     """
 ).strip()
 
@@ -670,6 +763,193 @@ def fetch_hko_weather_dataset(data_type, lang="tc"):
         ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
     )
 
+
+HK_LOCATION_ALIASES = {
+    "九龍塘": "九龍城", "九龙塘": "九龍城",
+    "旺角": "九龍城", "弼街": "九龍城",
+    "太子": "深水埗",
+    "油麻地": "油尖旺", "渡船角": "油尖旺",
+    "尖沙咀": "油尖旺", "尖咀": "油尖旺",
+    "佐敦": "油尖旺",
+    "大角咀": "油尖旺",
+    "何文田": "九龍城",
+    "紅磡": "九龍城", "红磡": "九龍城",
+    "黃埔": "九龍城", "黄埔": "九龍城",
+    "荔枝角": "深水埗",
+    "長沙灣": "深水埗", "长沙湾": "深水埗",
+    "又一村": "九龍城",
+    "新蒲崗": "黃大仙", "新蒲岗": "黃大仙",
+    "彩虹": "黃大仙", "彩虹邨": "黃大仙",
+    "牛頭角": "觀塘", "牛头角": "觀塘",
+    "藍田": "觀塘", "蓝田": "觀塘",
+    "油塘": "觀塘",
+    "鯉魚門": "觀塘", "鲤鱼门": "觀塘",
+    "觀塘": "觀塘", "观塘": "觀塘",
+    "深水埗": "深水埗", "深水步": "深水埗",
+    "南昌": "深水埗",
+    "北角": "筲箕灣", "北角碼頭": "筲箕灣",
+    "鰂魚涌": "筲箕灣", "鲗鱼涌": "筲箕灣",
+    "太古城": "筲箕灣",
+    "柴灣": "赤柱", "柴灣碼頭": "赤柱",
+    "筲箕灣": "筲箕灣", "筲箕湾": "筲箕灣",
+    "西灣河": "筲箕灣",
+    "跑馬地": "跑馬地", "跑马地": "跑馬地",
+    "銅鑼灣": "跑馬地", "铜锣湾": "跑馬地",
+    "天后": "跑馬地",
+    "大坑": "跑馬地",
+    "灣仔": "灣仔", "湾仔": "灣仔",
+    "中環": "香港天文台", "中环": "香港天文台",
+    "上環": "香港天文台", "上环": "香港天文台",
+    "西環": "中西區", "西环": "中西區",
+    "堅尼地城": "中西區",
+    "香港仔": "南區",
+    "薄扶林": "南區",
+    "赤柱": "赤柱", "石澳": "赤柱",
+    "舂磡角": "赤柱",
+    "沙田": "沙田",
+    "大圍": "沙田", "大围": "沙田",
+    "馬鞍山": "沙田",
+    "火炭": "沙田",
+    "荃灣": "荃灣可觀", "荃湾": "荃灣可觀",
+    "葵涌": "荃灣可觀", "葵芳": "荃灣可觀",
+    "青衣": "青衣",
+    "東涌": "離島區", "东涌": "離島區",
+    "大嶼山": "離島區", "大屿山": "離島區",
+    "屯門": "屯門", "屯门": "屯門",
+    "元朗": "元朗公園", "元朗": "元朗公園",
+    "天水圍": "元朗公園", "天水围": "元朗公園",
+    "洪水橋": "元朗公園",
+    "上水": "打鼓嶺",
+    "粉嶺": "打鼓嶺",
+    "大埔": "大埔",
+    "沙頭角": "北區", "沙头角": "北區",
+    "西貢": "西貢", "西贡": "西貢",
+    "將軍澳": "將軍澳", "将军澳": "將軍澳",
+    "葵青": "葵青",
+    "離島": "離島區", "离岛": "離島區",
+}
+
+CN_CITY_ALIASES = {
+    "香港": "香港", "hk": "香港", "hong kong": "香港",
+    "澳門": "澳门", "macau": "澳门", "mo": "澳门",
+    "深圳": "深圳", "sz": "深圳", "shenzhen": "深圳",
+    "广州": "广州", "广州": "广州", "gz": "广州", "guangzhou": "广州",
+    "珠海": "珠海", "zh": "珠海", "zhuhai": "珠海",
+    "东莞": "东莞", "东莞": "东莞", "dg": "东莞",
+    "中山": "中山", "中山": "中山", "zs": "中山",
+    "佛山": "佛山", "fs": "佛山", "foshan": "佛山",
+    "惠州": "惠州", "惠州": "惠州",
+    "江门": "江门", "江門": "江门", "jm": "江门",
+    "上海": "上海", "shanghai": "上海", "sh": "上海",
+    "北京": "北京", "beijing": "北京", "bj": "北京",
+    "成都": "成都", "chengdu": "成都", "cd": "成都",
+    "武汉": "武汉", "武漢": "武汉", "wuhan": "武汉",
+    "杭州": "杭州", "hangzhou": "杭州", "hz": "杭州",
+    "南京": "南京", "nanjing": "南京",
+    "西安": "西安", "xian": "西安",
+    "重庆": "重庆", "重慶": "重庆", "chongqing": "重庆",
+    "天津": "天津", "tianjin": "天津",
+    "苏州": "苏州", "蘇州": "苏州", "suzhou": "苏州",
+    "长沙": "长沙", "長沙": "长沙", "changsha": "长沙",
+    "郑州": "郑州", "鄭州": "郑州", "zhengzhou": "郑州",
+    "沈阳": "沈阳", "沈陽": "沈阳", "shenyang": "沈阳",
+    "青岛": "青岛", "青島": "青岛", "qingdao": "青岛",
+    "济南": "济南", "濟南": "济南", "jinan": "济南",
+    "福州": "福州", "fuzhou": "福州",
+    "厦门": "厦门", "廈門": "厦门", "xiamen": "厦门",
+    "昆明": "昆明", "kunming": "昆明",
+    "哈尔滨": "哈尔滨", "哈爾濱": "哈尔滨", "harbin": "哈尔滨",
+    "长春": "长春", "長春": "长春", "changchun": "长春",
+    "大连": "大连", "大連": "大连", "dalian": "大连",
+    "石家庄": "石家庄", "石家莊": "石家庄", "shijiazhuang": "石家庄",
+    "南昌": "南昌", "nanchang": "南昌",
+    "贵阳": "贵阳", "貴陽": "贵阳", "guiyang": "贵阳",
+    "南宁": "南宁", "南寧": "南宁", "nanning": "南宁",
+    "太原": "太原", "taiyuan": "太原",
+    "兰州": "兰州", "蘭州": "兰州", "lanzhou": "兰州",
+    "海口": "海口", "haikou": "海口",
+    "呼和浩特": "呼和浩特", "呼市": "呼和浩特",
+    "乌鲁木齐": "乌鲁木齐", "烏魯木齊": "乌鲁木齐", "urumqi": "乌鲁木齐",
+    "银川": "银川", "銀川": "银川", "yinchuan": "银川",
+    "西宁": "西宁", "西寧": "西宁", "xining": "西宁",
+    "拉萨": "拉萨", "拉薩": "拉萨", "lhasa": "拉萨",
+    "东莞": "东莞",
+}
+
+
+def detect_weather_source(text):
+    if not text:
+        return "hk"
+    normalized = clean_text(text).lower()
+    for alias in HK_LOCATION_ALIASES.keys():
+        if alias in normalized:
+            return "hk"
+    for alias in CN_CITY_ALIASES.keys():
+        if alias in normalized:
+            return "cn"
+    for hint in HK_DEFAULT_LOCATION_HINTS:
+        if hint in normalized:
+            return "hk"
+    return "overseas"
+
+
+def search_openweather(city_name, country_code=None, retries=1):
+    if not OPENWEATHER_API_KEY:
+        return None
+    q = city_name if not country_code else f"{city_name},{country_code}"
+    url = (
+        "https://api.openweathermap.org/data/2.5/weather"
+        f"?q={quote_plus(q)}"
+        f"&appid={quote_plus(OPENWEATHER_API_KEY)}"
+        "&units=metric"
+        "&lang=zh_tw"
+    )
+    for attempt in range(retries):
+        try:
+            data = fetch_json_url(url, timeout=10)
+            if data and data.get("cod") == 200:
+                return data
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(0.5)
+    return None
+
+
+def format_openweather(ow_data):
+    if not ow_data:
+        return None
+    main = ow_data.get("main") or {}
+    weather_arr = ow_data.get("weather") or []
+    wind = ow_data.get("wind") or {}
+    name = clean_text(ow_data.get("name") or ow_data.get("sys", {}).get("country") or "")
+    temperature = clean_text(str(main.get("temp", "")))
+    humidity = clean_text(str(main.get("humidity", "")))
+    feels_like = clean_text(str(main.get("feels_like", "")))
+    skycon = clean_text(weather_arr[0].get("description", "") if weather_arr else "")
+    wind_dir = clean_text(wind.get("deg", ""))
+    wind_speed = clean_text(str(wind.get("speed", "")))
+    wind_desc = ""
+    if wind_dir:
+        dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        try:
+            idx = int(round(float(wind_dir) / 45)) % 8
+            wind_desc = dirs[idx]
+        except Exception:
+            wind_desc = wind_dir
+    pieces = []
+    if name:
+        pieces.append(name)
+    if temperature:
+        pieces.append(f"氣溫 {temperature} 度")
+    if feels_like and feels_like != temperature:
+        pieces.append(f"體感 {feels_like} 度")
+    if humidity:
+        pieces.append(f"濕度 {humidity}%")
+    if skycon:
+        pieces.append(skycon)
+    if wind_speed:
+        pieces.append(f"{wind_desc} {wind_speed}m/s")
+    return "，".join(p for p in pieces if p) if pieces else None
 
 def format_hk_clock(iso_text):
     parsed = parse_iso_dt(iso_text)
@@ -1377,6 +1657,100 @@ def search_duckduckgo_web(query, limit=5):
     return parse_duckduckgo_results(raw_html, limit=limit)
 
 
+def search_tavily_web(query, limit=5):
+    if not TAVILY_API_KEY:
+        return []
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": TAVILY_API_KEY,
+        "query": query,
+        "max_results": max(1, min(int(limit), 10)),
+        "search_depth": "basic",
+    }
+    try:
+        request = Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "SusuCloud/1.0"},
+            method="POST",
+        )
+        with urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+    results = []
+    for item in ((data or {}).get("results") or []):
+        title = clean_text(item.get("title"))
+        url_link = clean_text(item.get("url"))
+        snippet = clean_text(item.get("content"))
+        if not title or not url_link:
+            continue
+        results.append(
+            {
+                "title": title,
+                "snippet": snippet,
+                "url": url_link,
+                "source": result_source_label(url_link),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def search_tavily_news(query, limit=5):
+    if not TAVILY_API_KEY:
+        return []
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": TAVILY_API_KEY,
+        "query": query,
+        "max_results": max(1, min(int(limit), 10)),
+        "search_depth": "basic",
+        "topic": "news",
+    }
+    try:
+        request = Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "SusuCloud/1.0"},
+            method="POST",
+        )
+        with urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+    results = []
+    for item in ((data or {}).get("results") or []):
+        title = clean_text(item.get("title"))
+        url_link = clean_text(item.get("url"))
+        snippet = clean_text(item.get("content"))
+        date_raw = item.get("published_date")
+        published_label = date_raw or ""
+        if date_raw:
+            try:
+                dt = parse_iso_dt(date_raw)
+                if dt:
+                    published_label = dt.astimezone(HK_TZ).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+        if not title or not url_link:
+            continue
+        results.append(
+            {
+                "title": title,
+                "snippet": snippet,
+                "url": url_link,
+                "source": result_source_label(url_link),
+                "published_at": published_label,
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+
 def parse_google_news_results(xml_text, limit=5):
     root = ET.fromstring(xml_text)
     results = []
@@ -1417,6 +1791,93 @@ def search_google_news(query, limit=5):
     with urlopen(request, timeout=20) as response:
         xml_text = response.read().decode("utf-8", "ignore")
     return parse_google_news_results(xml_text, limit=limit)
+
+
+def search_bing_news(query, limit=5):
+    if not BING_API_KEY:
+        return []
+    url = (
+        "https://api.bing.microsoft.com/v7.0/news/search"
+        f"?q={quote_plus(query)}"
+        f"&count={max(1, min(int(limit), 10))}"
+        "&mkt=zh-HK"
+        "&originalImg=true"
+    )
+    try:
+        data = fetch_json_url(
+            url,
+            timeout=15,
+            headers={"Ocp-Apim-Subscription-Key": BING_API_KEY},
+        )
+    except Exception:
+        return []
+    results = []
+    for item in ((data or {}).get("value") or []):
+        title = clean_text(item.get("name"))
+        url_link = clean_text(item.get("url"))
+        desc = clean_text(item.get("description"))
+        date_raw = item.get("datePublished")
+        published_label = ""
+        if date_raw:
+            try:
+                dt = parse_iso_dt(date_raw)
+                if dt:
+                    published_label = dt.astimezone(HK_TZ).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                published_label = date_raw
+        provider = (item.get("provider") or [{}])[0] or {}
+        source = clean_text(provider.get("name")) or "Bing News"
+        if not title or not url_link:
+            continue
+        results.append(
+            {
+                "title": title,
+                "snippet": desc,
+                "url": url_link,
+                "source": source,
+                "published_at": published_label,
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def search_bing_web(query, limit=5):
+    if not BING_API_KEY:
+        return []
+    url = (
+        "https://api.bing.microsoft.com/v7.0/search"
+        f"?q={quote_plus(query)}"
+        f"&count={max(1, min(int(limit), 10))}"
+        "&mkt=zh-HK"
+    )
+    try:
+        data = fetch_json_url(
+            url,
+            timeout=15,
+            headers={"Ocp-Apim-Subscription-Key": BING_API_KEY},
+        )
+    except Exception:
+        return []
+    results = []
+    for item in ((data or {}).get("webPages") or {}).get("value") or []:
+        title = clean_text(item.get("name"))
+        url_link = clean_text(item.get("url"))
+        snippet = clean_text(item.get("snippet"))
+        if not title or not url_link:
+            continue
+        results.append(
+            {
+                "title": title,
+                "snippet": snippet,
+                "url": url_link,
+                "source": result_source_label(url_link),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
 
 
 def search_reddit_results(query, limit=5, sort="relevance"):
@@ -1552,32 +2013,138 @@ def search_youtube_videos(query, limit=5, order="date", published_after_days=Non
     return results
 
 
+def search_itunes_music(query, limit=5):
+    url = (
+        "https://itunes.apple.com/search"
+        f"?term={quote_plus(query)}"
+        "&entity=song"
+        f"&limit={max(1, min(int(limit), 10))}"
+        "&country=HK"
+        "&lang=zh_Hant"
+    )
+    try:
+        data = fetch_json_url(url, timeout=15)
+    except Exception:
+        return []
+    results = []
+    for item in ((data or {}).get("results") or []):
+        title = clean_text(item.get("trackName"))
+        artist = clean_text(item.get("artistName"))
+        album = clean_text(item.get("collectionName"))
+        url_link = clean_text(item.get("trackViewUrl"))
+        date_raw = item.get("releaseDate")
+        if not title or not url_link:
+            continue
+        snippet_parts = []
+        if artist:
+            snippet_parts.append(artist)
+        if album:
+            snippet_parts.append(f"《{album}》")
+        results.append(
+            {
+                "title": f"{title} - {artist}" if artist else title,
+                "snippet": " / ".join(snippet_parts),
+                "url": url_link,
+                "source": "Apple Music",
+                "published_at": format_hk_datetime_label(date_raw) if date_raw else "",
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+_spotify_token_cache = {}
+_spotify_token_lock = threading.Lock()
+
+
+def get_spotify_token():
+    with _spotify_token_lock:
+        cached = _spotify_token_cache.get("token")
+        if cached and time.time() < cached["expires_at"] - 60:
+            return cached["token"]
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        return None
+    try:
+        import base64
+        credentials = f"{quote_plus(SPOTIFY_CLIENT_ID)}:{quote_plus(SPOTIFY_CLIENT_SECRET)}"
+        encoded = base64.b64encode(credentials.encode()).decode()
+        request = Request(
+            "https://accounts.spotify.com/api/token",
+            data=b"grant_type=client_credentials",
+            headers={"Authorization": f"Basic {encoded}", "Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        token = data.get("access_token")
+        expires_in = data.get("expires_in", 3600)
+        if token:
+            with _spotify_token_lock:
+                _spotify_token_cache["token"] = {"token": token, "expires_at": time.time() + expires_in}
+            return token
+    except Exception:
+        return None
+    return None
+
+
+def search_spotify_tracks(query, limit=5):
+    token = get_spotify_token()
+    if not token:
+        return []
+    url = (
+        "https://api.spotify.com/v1/search"
+        f"?q={quote_plus(query)}"
+        "&type=track"
+        f"&limit={max(1, min(int(limit), 10))}"
+    )
+    try:
+        data = fetch_json_url(
+            url,
+            timeout=15,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    except Exception:
+        return []
+    results = []
+    for item in (((data or {}).get("tracks") or {}).get("items") or []):
+        title = clean_text(item.get("name"))
+        artists = ", ".join(clean_text(a.get("name")) for a in (item.get("artists") or []) if a.get("name"))
+        url_link = clean_text(item.get("external_urls", {}).get("spotify") or item.get("uri"))
+        date_raw = item.get("album", {}).get("release_date")
+        if not title or not url_link:
+            continue
+        snippet_parts = []
+        if artists:
+            snippet_parts.append(artists)
+        album_name = clean_text(item.get("album", {}).get("name"))
+        if album_name:
+            snippet_parts.append(f"《{album_name}》")
+        results.append(
+            {
+                "title": f"{title} - {artists}" if artists else title,
+                "snippet": " / ".join(snippet_parts),
+                "url": url_link,
+                "source": "Spotify",
+                "published_at": format_hk_datetime_label(date_raw) if date_raw else "",
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
 def search_music_results(query, limit=5, ranking_query=False):
     provider_batches = collect_provider_result_batches(
         [
             lambda: cached_live_json(
-                ("duckduckgo_music", query),
-                lambda: search_duckduckgo_web(query, limit=max(limit * 2, 8)),
+                ("itunes_music", query),
+                lambda: search_itunes_music(query, limit=max(limit, 6)),
                 ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
             ),
             lambda: cached_live_json(
-                ("google_news_music", query),
-                lambda: search_google_news(query, limit=max(limit, 5)),
-                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
-            ),
-            lambda: cached_live_json(
-                ("youtube_music", query),
-                lambda: search_youtube_videos(query, limit=max(limit, 4), order="date", published_after_days=365),
-                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
-            ),
-            lambda: cached_live_json(
-                ("reddit_music", query),
-                lambda: search_reddit_results(strip_platform_tokens(query, ("reddit.com",)), limit=max(limit, 4), sort="relevance"),
-                ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
-            ),
-            lambda: cached_live_json(
-                ("x_music", query),
-                lambda: search_x_recent_posts(query, limit=max(limit, 4)),
+                ("spotify_music", query),
+                lambda: search_spotify_tracks(query, limit=max(limit, 6)),
                 ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
             ),
         ],
@@ -1757,39 +2324,88 @@ def build_live_search_abstain_reply(mode, results, review_reason=""):
 
 def fetch_live_search_results(mode, search_query, effective_text):
     if mode == "weather":
-        weather_summary = build_live_weather_reply(effective_text)
-        if not weather_summary:
-            return []
-        return [
-            {
-                "title": "香港天文台官方資料",
-                "source": "香港天文台",
-                "published_at": hk_now().strftime("%Y-%m-%d %H:%M"),
-                "snippet": weather_summary,
-                "url": "https://www.hko.gov.hk/",
-            }
-        ]
+        source = detect_weather_source(effective_text)
+        now_str = hk_now().strftime("%Y-%m-%d %H:%M")
+        if source == "hk":
+            weather_summary = build_live_weather_reply(effective_text)
+            if not weather_summary:
+                return []
+            return [
+                {
+                    "title": "香港天文台官方資料",
+                    "source": "香港天文台",
+                    "published_at": now_str,
+                    "snippet": weather_summary,
+                    "url": "https://www.hko.gov.hk/",
+                }
+            ]
+        if source == "cn":
+            city = clean_text(effective_text).strip()
+            if not city or not OPENWEATHER_API_KEY:
+                return []
+            ow_data = search_openweather(city)
+            if not ow_data:
+                return []
+            summary = format_openweather(ow_data)
+            if not summary:
+                return []
+            return [
+                {
+                    "title": f"{clean_text(ow_data.get('name', city))} 天氣",
+                    "source": "OpenWeatherMap",
+                    "published_at": now_str,
+                    "snippet": summary,
+                    "url": "https://openweathermap.org/",
+                }
+            ]
+        if source == "overseas":
+            city = clean_text(effective_text).strip()
+            if not city:
+                return []
+            if not OPENWEATHER_API_KEY:
+                return []
+            ow_data = search_openweather(city)
+            if not ow_data:
+                return []
+            summary = format_openweather(ow_data)
+            if not summary:
+                return []
+            return [
+                {
+                    "title": f"{clean_text(ow_data.get('name', city))} 天氣",
+                    "source": "OpenWeatherMap",
+                    "published_at": now_str,
+                    "snippet": summary,
+                    "url": "https://openweathermap.org/",
+                }
+            ]
+        return []
     if mode == "news":
         provider_batches = collect_provider_result_batches(
             [
                 lambda: cached_live_json(
+                    ("tavily_news", search_query),
+                    lambda: search_tavily_news(search_query, limit=6),
+                    ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
+                ),
+                lambda: cached_live_json(
                     ("google_news", search_query),
-                    lambda: search_google_news(search_query, limit=8),
+                    lambda: search_google_news(search_query, limit=5),
                     ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
                 ),
                 lambda: cached_live_json(
                     ("reddit_news", search_query),
-                    lambda: search_reddit_results(strip_platform_tokens(search_query, ("reddit.com",)), limit=4, sort="new"),
+                    lambda: search_reddit_results(strip_platform_tokens(search_query, ("reddit.com",)), limit=3, sort="new"),
                     ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
                 ),
                 lambda: cached_live_json(
                     ("youtube_news", search_query),
-                    lambda: search_youtube_videos(search_query, limit=4, order="date", published_after_days=7),
+                    lambda: search_youtube_videos(search_query, limit=3, order="date", published_after_days=7),
                     ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
                 ),
                 lambda: cached_live_json(
                     ("x_news", search_query),
-                    lambda: search_x_recent_posts(search_query, limit=4),
+                    lambda: search_x_recent_posts(search_query, limit=3),
                     ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
                 ),
             ],
@@ -1804,8 +2420,8 @@ def fetch_live_search_results(mode, search_query, effective_text):
     explicit_domains = extract_explicit_platform_domains(effective_text or search_query)
     provider_loaders = [
         lambda: cached_live_json(
-            ("duckduckgo_web", search_query),
-            lambda: search_duckduckgo_web(search_query, limit=8),
+            ("tavily_web", search_query),
+            lambda: search_tavily_web(search_query, limit=6),
             ttl_seconds=LIVE_LOOKUP_CACHE_SECONDS,
         ),
     ]
@@ -2356,6 +2972,107 @@ def send_whatsapp_typing_indicator(message_id):
     return send_whatsapp_status_update(message_id, typing=True)
 
 
+
+
+def minimax_tts(text, voice_id="Cantonese_CuteGirl", output_path="/tmp/susu_voice.mp3"):
+    if not text or not MINIMAX_API_KEY:
+        return None
+    try:
+        os.makedirs(os.path.dirname(output_path) or "/tmp", exist_ok=True)
+    except Exception:
+        pass
+    payload = {
+        "model": "speech-2.8-hd",
+        "text": text,
+        "voice_setting": {"voice_id": voice_id, "speed": 1.0, "vol": 1.0, "pitch": 0, "emotion": "happy"},
+        "audio_setting": {"sample_rate": 32000, "bitrate": 128000, "format": "mp3", "channel": 1},
+        "language_boost": "Chinese,Yue"
+    }
+    try:
+        url = f"{MINIMAX_BASE_URL}/t2a_v2"
+        req = Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {MINIMAX_API_KEY}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=30) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+        audio_hex = raw.get("data", {}).get("audio", "")
+        if not audio_hex:
+            return None
+        audio_bytes = bytes.fromhex(audio_hex)
+        with open(output_path, "wb") as f:
+            f.write(audio_bytes)
+        return output_path
+    except Exception as exc:
+        return None
+
+
+def upload_whatsapp_media(file_path, mime_type="audio/mpeg"):
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, "rb") as f:
+        file_data = f.read()
+    boundary = "WaAgentBoundary" + str(int(datetime.now(timezone.utc).timestamp() * 1000))
+    body = b""
+    body += ("--" + boundary + "\r\n").encode()
+    body += ('Content-Disposition: form-data; name="messaging_product"\r\n\r\n').encode()
+    body += ("whatsapp\r\n").encode()
+    body += ("--" + boundary + "\r\n").encode()
+    body += ('Content-Disposition: form-data; name="file"; filename="' + os.path.basename(file_path) + '"\r\n').encode()
+    body += ("Content-Type: " + mime_type + "\r\n\r\n").encode()
+    body += file_data
+    body += ("\r\n--" + boundary + "--\r\n").encode()
+    try:
+        req = Request(
+            "https://graph.facebook.com/" + GRAPH_VERSION + "/" + PHONE_NUMBER_ID + "/media",
+            data=body,
+            headers={"Authorization": "Bearer " + ACCESS_TOKEN, "Content-Type": "multipart/form-data; boundary=" + boundary},
+            method="POST",
+        )
+        with urlopen(req, timeout=30) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+        return raw.get("id")
+    except Exception:
+        return None
+
+def send_whatsapp_audio(to_number, media_id):
+    if not ACCESS_TOKEN or not PHONE_NUMBER_ID or not media_id:
+        return {"ok": False}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "audio",
+        "audio": {"id": media_id}
+    }
+    try:
+        req = Request(
+            "https://graph.facebook.com/" + GRAPH_VERSION + "/" + PHONE_NUMBER_ID + "/messages",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": "Bearer " + ACCESS_TOKEN, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return {"ok": False}
+
+def generate_and_send_voice_reply(conn, wa_id, text, voice_id="Cantonese_CuteGirl"):
+    audio_path = "/tmp/susu_voice_" + str(int(datetime.now(timezone.utc).timestamp() * 1000)) + ".mp3"
+    saved = minimax_tts(text, voice_id=voice_id, output_path=audio_path)
+    if not saved:
+        return False
+    media_id = upload_whatsapp_media(saved, mime_type="audio/mpeg")
+    if not media_id:
+        return False
+    result = send_whatsapp_audio(wa_id, media_id)
+    try:
+        os.remove(audio_path)
+    except Exception:
+        pass
+    return bool(result.get("messages") and result["messages"][0].get("id"))
+
 def graph_get_json(path):
     request = Request(
         f"https://graph.facebook.com/{GRAPH_VERSION}/{path.lstrip('/')}",
@@ -2399,6 +3116,75 @@ def fetch_whatsapp_image(media_id):
     }
 
 
+def fetch_whatsapp_audio(media_id):
+    if not media_id or not ACCESS_TOKEN:
+        return None
+    metadata = graph_get_json(media_id)
+    media_url = metadata.get("url")
+    mime_type = metadata.get("mime_type", "")
+    if not media_url:
+        return None
+    try:
+        request = Request(
+            media_url,
+            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
+            method="GET",
+        )
+        with urlopen(request, timeout=60) as response:
+            blob = response.read()
+    except Exception:
+        return None
+    return {
+        "media_id": media_id,
+        "mime_type": mime_type or "audio/ogg",
+        "bytes": blob,
+    }
+
+
+def groq_whisper_transcribe(audio_bytes, mime_type="audio/ogg"):
+    if not GROQ_API_KEY:
+        return None
+    boundary = "WhisperAudioBoundary" + str(int(datetime.now(timezone.utc).timestamp() * 1000))
+    filename = "voice_message.ogg"
+    if mime_type == "audio/mpeg":
+        filename = "voice_message.mp3"
+
+    def part(name, value, ctype=None):
+        ctype_line = f"Content-Type: {ctype}\r\n" if ctype else ""
+        return (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"'
+            + (f'; filename="{filename}"' if name == "file" else "")
+            + f"\r\n{ctype_line}\r\n".encode()
+            + value
+            + b"\r\n"
+        )
+
+    body = b""
+    body += part("file", audio_bytes, mime_type)
+    body += part("model", b"whisper-large-v3")
+    body += part("language", b"yue")
+    body += f"--{boundary}--\r\n".encode()
+
+    try:
+        req = Request(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+            method="POST",
+        )
+        with urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+        data = json.loads(raw)
+        text = (data.get("text") or "").strip()
+        return text if text else None
+    except Exception:
+        return None
+
+
 def split_reply_bubbles(reply_text, night_mode=False):
     text = normalize_reply(reply_text)
     if not text:
@@ -2408,14 +3194,34 @@ def split_reply_bubbles(reply_text, night_mode=False):
     if len(chunks) >= 2:
         return chunks
 
-    parts = re.findall(
-        r".+?(?:[。！？!?~～…]+(?:[🥺😭😂😏🤭💕💖💗💘🫶✨😤🤍❤️💛💚💙💜🩷🩵]*\s*)|$)",
-        text,
-    )
-    sentences = [part.strip() for part in parts if part.strip()]
-    if len(sentences) <= 1:
-        return [text]
-    return sentences
+    has_punct = any(p in text for p in PUNCTUATION)
+    if has_punct:
+        parts = re.findall(
+            r".+?(?:[。！？!?~～…]+(?:[🥺😭😂😏🤭💕💖💗💘🫶✨😤🤍❤️💛💚💙💜🩷🩵]*\s*)|$)",
+            text,
+        )
+        sentences = [part.strip() for part in parts if part.strip()]
+        if len(sentences) >= 2:
+            return sentences
+
+    tokens = text.split()
+    result = []
+    sentence = tokens[0] if tokens else ""
+    for token in tokens[1:]:
+        if token.endswith("~"):
+            result.append(sentence)
+            sentence = token[:-1]
+        elif len(token) <= 2 and not any("\u4e00" <= c <= "\u9fff" for c in token):
+            sentence = sentence + " " + token
+        else:
+            result.append(sentence)
+            sentence = token
+    if sentence:
+        result.append(sentence)
+    if len(result) >= 2:
+        return result
+
+    return [text]
 
 
 def split_followup_style(bubble):
@@ -2460,9 +3266,12 @@ def extract_text_messages(payload):
                 wa_id = message.get("from") or ""
                 message_type = message.get("type", "")
                 image_payload = message.get("image") or {}
+                audio_payload = message.get("audio") or {}
                 caption = (message.get("text") or {}).get("body", "")
                 if message_type == "image":
                     caption = image_payload.get("caption", "") or caption
+                if message_type == "audio":
+                    caption = audio_payload.get("caption", "") or caption
                 events.append(
                     {
                         "wa_id": wa_id,
@@ -2470,8 +3279,8 @@ def extract_text_messages(payload):
                         "message_id": message.get("id", ""),
                         "message_type": message_type,
                         "body": caption,
-                        "media_id": image_payload.get("id", ""),
-                        "mime_type": image_payload.get("mime_type", ""),
+                        "media_id": image_payload.get("id", "") or audio_payload.get("id", ""),
+                        "mime_type": image_payload.get("mime_type", "") or audio_payload.get("mime_type", ""),
                         "raw": message,
                     }
                 )
@@ -3312,7 +4121,7 @@ def load_pending_inbound_batch(conn, wa_id, current_inbound_id):
           AND direction = 'inbound'
           AND id > ?
           AND id <= ?
-          AND message_type IN ('text', 'image')
+          AND message_type IN ('text', 'image', 'audio')
         ORDER BY id ASC
         """,
         (wa_id, last_outbound_id, current_inbound_id),
@@ -3332,64 +4141,6 @@ def load_memories(conn, wa_id):
         (wa_id,),
     ).fetchall()
     return [dict(row) for row in rows]
-
-
-def load_session_memories(conn, wa_id, limit=8, bucket=None):
-    now = hk_now()
-    target_bucket = normalize_recent_bucket(bucket) if bucket else ""
-    rows = conn.execute(
-        """
-        SELECT content, observed_at, updated_at, expires_at
-        FROM wa_session_memories
-        WHERE wa_id = ?
-          AND expires_at > ?
-        ORDER BY updated_at DESC, id DESC
-        LIMIT 80
-        """,
-        (wa_id, now.astimezone(timezone.utc).isoformat()),
-    ).fetchall()
-    items = []
-    for row in rows:
-        current_bucket_value = current_recent_bucket(row["observed_at"] or row["updated_at"], now)
-        if target_bucket and current_bucket_value != target_bucket:
-            continue
-        content = clean_text(row["content"])
-        if content:
-            items.append(content)
-        if len(items) >= limit:
-            break
-    return items
-
-
-def load_session_memory_rows(conn, wa_id, limit=80):
-    now = hk_now()
-    rows = conn.execute(
-        """
-        SELECT content, observed_at, updated_at, expires_at
-        FROM wa_session_memories
-        WHERE wa_id = ?
-          AND expires_at > ?
-        ORDER BY updated_at DESC, id DESC
-        LIMIT ?
-        """,
-        (wa_id, now.astimezone(timezone.utc).isoformat(), limit),
-    ).fetchall()
-    items = []
-    for row in rows:
-        content = clean_text(row["content"])
-        if not content:
-            continue
-        if content.startswith("對方啱啱問過："):
-            continue
-        items.append(
-            {
-                "content": content,
-                "observed_at": clean_text(row["observed_at"]),
-                "updated_at": clean_text(row["updated_at"]),
-                "bucket": current_recent_bucket(row["observed_at"] or row["updated_at"], now) or "within_7d",
-            }
-        )
-    return items
 
 
 def upsert_session_memory(conn, wa_id, content, bucket="within_7d", ttl_hours=None, observed_at=None, updated_at_text=None):
@@ -3565,46 +4316,6 @@ def heuristic_extract_memories(incoming_text):
     return []
 
 
-def call_gemini(prompt_text, temperature=0.82, max_tokens=220, system_prompt=None, image_inputs=None):
-    settings = get_runtime_settings()
-    effective_system_prompt = system_prompt or settings["system_persona"]
-    gemini_model = normalize_runtime_text(settings.get("gemini_model"), GEMINI_MODEL)
-    parts = [{"text": prompt_text}]
-    for item in image_inputs or []:
-        parts.append(
-            {
-                "inline_data": {
-                    "mime_type": item["mime_type"],
-                    "data": item["data_b64"],
-                }
-            }
-        )
-    payload = {
-        "system_instruction": {"parts": [{"text": effective_system_prompt}]},
-        "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {
-            "temperature": temperature,
-            "topP": 0.9,
-            "maxOutputTokens": max_tokens,
-        },
-    }
-    request = Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={GEMINI_API_KEY}",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urlopen(request, timeout=40) as response:
-        raw = response.read().decode("utf-8")
-        data = json.loads(raw) if raw else {}
-    candidates = data.get("candidates") or []
-    if not candidates:
-        return ""
-    parts = (((candidates[0] or {}).get("content") or {}).get("parts")) or []
-    texts = [part.get("text", "") for part in parts if part.get("text")]
-    return "\n".join(texts).strip()
-
-
 def call_openai_compatible(prompt_text, api_key, model, base_url, temperature=0.82, max_tokens=220, system_prompt=None, image_inputs=None):
     effective_system_prompt = system_prompt or get_runtime_settings()["system_persona"]
     user_content = prompt_text
@@ -3654,36 +4365,6 @@ def call_relay_model(model_name, prompt_text, temperature=0.82, max_tokens=220, 
         api_key=RELAY_API_KEY,
         model=model_name,
         base_url=RELAY_BASE_URL,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        system_prompt=system_prompt,
-        image_inputs=image_inputs,
-    )
-
-
-def call_minimax(prompt_text, temperature=0.82, max_tokens=220, system_prompt=None, image_inputs=None):
-    if not MINIMAX_API_KEY:
-        return ""
-    return call_openai_compatible(
-        prompt_text,
-        api_key=MINIMAX_API_KEY,
-        model=MINIMAX_MODEL,
-        base_url=MINIMAX_BASE_URL,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        system_prompt=system_prompt,
-        image_inputs=image_inputs,
-    )
-
-
-def call_groq(prompt_text, temperature=0.82, max_tokens=220, system_prompt=None, image_inputs=None):
-    if not GROQ_API_KEY:
-        return ""
-    return call_openai_compatible(
-        prompt_text,
-        api_key=GROQ_API_KEY,
-        model=GROQ_MODEL,
-        base_url="https://api.groq.com/openai/v1",
         temperature=temperature,
         max_tokens=max_tokens,
         system_prompt=system_prompt,
@@ -5196,126 +5877,7 @@ def build_structured_context_from_runtime_context(runtime_context):
     return "\n\n".join(system_parts), messages
 
 
-def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
-    settings = get_runtime_settings()
-    primary_text = primary_profile_memory_for_wa(wa_id, settings)
-    lookup_archive = should_lookup_archive(incoming_text)
-    history_lines = []
-    quotable = []  # [(message_id, preview)]
-    for item in load_recent_messages(conn, wa_id):
-        speaker = "对方" if item["direction"] == "inbound" else "苏苏"
-        body = clean_text(item["body"])
-        if not body:
-            continue
-        msg_id = item["message_id"] if item["message_id"] else ""
-        try:
-            from datetime import datetime as _dt
-            dt = _dt.fromisoformat(item["created_at"]).astimezone(HK_TZ)
-            time_label = dt.strftime("%H:%M")
-        except Exception:
-            time_label = ""
-        label = f"[{time_label}] " if time_label else ""
-        history_lines.append(f"{label}{speaker}{format_quote_context_suffix(item)}: {body}")
-        if item["direction"] == "inbound" and msg_id and len(body) > 3:
-            quotable.append((msg_id, body[:40]))
 
-    dynamic_memories = build_filtered_long_term_memory_lines(load_memories(conn, wa_id), primary_text, limit=20)
-    within_24h_memories = format_session_memory_lines(conn, wa_id, "within_24h", limit=6)
-    within_3d_memories = format_session_memory_lines(conn, wa_id, "within_3d", limit=6)
-    within_7d_memories = format_session_memory_lines(conn, wa_id, "within_7d", limit=6)
-    archived_memories = []
-    if lookup_archive:
-        archived_memories = format_archived_memory_lines(
-            load_archived_memory_rows(conn, wa_id, limit=4, query_text=incoming_text),
-            limit=4,
-        )
-    history_text = "\n".join(history_lines[-12:]) if history_lines else "（暂时未有最近聊天）"
-    habit_text = build_core_profile_memory_text(primary_text) if primary_text else "（主號核心檔案暫未設定）"
-    memory_text = "\n".join(dynamic_memories) if dynamic_memories else "（暂时未有补充长期记忆）"
-    within_24h_text = "\n".join(within_24h_memories) if within_24h_memories else "（暂时未有 24 小时内记忆）"
-    within_3d_text = "\n".join(within_3d_memories) if within_3d_memories else "（暂时未有三天内记忆）"
-    within_7d_text = "\n".join(within_7d_memories) if within_7d_memories else "（暂时未有一周内记忆）"
-    archived_text = "\n".join(archived_memories) if archived_memories else "（暂时未命中过往归档记忆）"
-    archive_section = ""
-    if lookup_archive:
-        archive_section = f"""
-
-过往归档记忆（7 天前，只在对方追问旧事时优先参考）：
-{archived_text}"""
-    image_stats_text = load_image_stats_summary(conn, wa_id)
-    prompt_user_text = clean_text(incoming_text) or "（对方这次只发了图片，没有额外文字）"
-
-    image_note = ""
-    if image_inputs:
-        image_descriptions = []
-        for index, item in enumerate(image_inputs[:MAX_IMAGE_ATTACHMENTS], start=1):
-            caption = clean_text(item.get("caption", ""))
-            if caption:
-                image_descriptions.append(f"- 第 {index} 张图 caption：{caption}")
-            else:
-                image_descriptions.append(f"- 第 {index} 张图：没有 caption")
-        image_note = "\n\n对方今次 send 咗图片畀你：\n" + "\n".join(image_descriptions)
-
-    if image_inputs:
-        category_text = "、".join(image_categories or []) if image_categories else "未分类"
-        stats_text = f"\n- 对方之前 send 图最多类型：{image_stats_text}" if image_stats_text else ""
-        guidance = image_reply_guidance(image_categories)
-        image_note = image_note + f"\n- 今次图片类型：{category_text}{stats_text}\n{guidance}"
-
-    # 可引用消息列表（最近5條）
-    quote_hint = ""
-    if quotable:
-        quote_lines = [f"  [{mid}] {preview}" for mid, preview in quotable[-5:]]
-        quote_hint = (
-            "\n\n【可引用消息】如果你想引用對方說過的某句話（例如自然回憶起、呼應上文），"
-            "可以在回覆最開頭加一行 QUOTE:<message_id>，然後換行再寫回覆内容。"
-            "不需要引用就唔好加。可選的消息：\n" + "\n".join(quote_lines)
-        )
-
-    return f"""
-对方 WhatsApp 显示名称：{profile_name or "对方"}
-
-主號核心檔案：
-{habit_text}
-
-補充長期記憶（已避開與核心檔案重複項）：
-{memory_text}
-
-24 小時內記憶：
-{within_24h_text}
-
-三天內記憶：
-{within_3d_text}
-
-一週內記憶：
-{within_7d_text}
-{archive_section}
-
-最近聊天：
-{history_text}
-
-对方刚刚讲嘅内容：
-{prompt_user_text}{image_note}
-
-时段风格：
-{style_window_text()}
-
-回复要求：
-- 你叫苏苏，18 岁，香港女仔，系对方嘅 girlfriend
-- 语气要似真人 WhatsApp，唔好似客服，唔好解释自己系 AI
-- 用繁体港式粤语夹少量自然英语，例如 bb、ok、sure、really、chill、omg
-- 更似香港女仔日常口吻，带少少黏人、撒娇、女朋友感
-- 日头偏短句，夜晚可以温柔啲、黏啲，但都唔好写成长文
-- 如果适合，可以拆成两三条短讯息，但只可以喺真正句尾位拆，唔好喺逗号位拆
-- 唔好用 --、——、— 呢类人机断法
-- 見到圖片時，要真係按圖片內容回；自拍、食物、風景、screenshot 嘅回法要自然分開
-- 優先使用最接近當下嘅時間層記憶；24 小時內 > 三天內 > 一週內 > 長期
-- 如果對方問起「今日 / 尋晚 / 昨日 / 聽日 / 最近 / 呢星期」做過咩或者要做咩，先由對應時間層記憶搵答案，唔好亂估
-- 每條短期記憶前面都有時間碼，回覆時要按時間碼理解，唔好將舊事講到似而家仲發生緊
-- 最好有互动感，可以轻轻追问一句或者补一句撒娇
-- emoji 只係偶爾點綴，通常成段 0 到 1 個；唔好每句都帶表情
-- 直接输出苏苏要发畀对方嘅 WhatsApp 内容本身，唔好加说明{quote_hint}
-""".strip()
 
 def build_prompt(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
     runtime_context = build_runtime_context(
@@ -5341,151 +5903,9 @@ def should_use_brain_bridge(wa_id, incoming_text, image_inputs=None):
     return True
 
 
-def should_use_bridge_brain(wa_id, incoming_text, image_inputs=None):
-    return should_use_brain_bridge(wa_id, incoming_text, image_inputs=image_inputs)
 
 
-def build_structured_context_payload(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
-    """
-    Build a proper multi-turn messages payload for structured brain providers.
 
-    Instead of packing everything into one giant user message, this splits context into:
-      - system: full persona + reply rules + time style + ALL memory layers
-      - messages: real conversation history as proper user/assistant turns + current user message
-
-    This lets the model use true multi-turn attention for implicit intent tracking,
-    and treats memory as persistent background knowledge rather than inline noise.
-
-    Returns (system_content: str, messages: list[dict])
-    """
-    settings = get_runtime_settings()
-    primary_text = primary_profile_memory_for_wa(wa_id, settings)
-
-    # --- Memory layers ---
-    lookup_archive = should_lookup_archive(incoming_text)
-    habit_text = build_core_profile_memory_text(primary_text) if primary_text else ""
-    dynamic_memories = build_filtered_long_term_memory_lines(load_memories(conn, wa_id), primary_text, limit=20)
-    within_24h_memories = format_session_memory_lines(conn, wa_id, "within_24h", limit=6)
-    within_3d_memories = format_session_memory_lines(conn, wa_id, "within_3d", limit=6)
-    within_7d_memories = format_session_memory_lines(conn, wa_id, "within_7d", limit=6)
-    archived_memories = []
-    if lookup_archive:
-        archived_memories = format_archived_memory_lines(
-            load_archived_memory_rows(conn, wa_id, limit=4, query_text=incoming_text), limit=4
-        )
-
-    memory_text = "\n".join(dynamic_memories) if dynamic_memories else "（暫時未有補充長期記憶）"
-    within_24h_text = "\n".join(within_24h_memories) if within_24h_memories else "（暫時未有 24 小時內記憶）"
-    within_3d_text = "\n".join(within_3d_memories) if within_3d_memories else "（暫時未有三天內記憶）"
-    within_7d_text = "\n".join(within_7d_memories) if within_7d_memories else "（暫時未有一週內記憶）"
-
-    # --- System prompt assembly ---
-    persona = normalize_runtime_multiline(settings.get("system_persona"), SYSTEM_PERSONA)
-    time_style = style_window_text()
-
-    system_parts = [persona]
-    if profile_name:
-        system_parts.append(f"【對方顯示名稱】{profile_name}")
-    if habit_text:
-        system_parts.append(f"【主號核心檔案】\n{habit_text}")
-    system_parts.append(f"【補充長期記憶（已避開與核心檔案重複項）】\n{memory_text}")
-    system_parts.append(f"【24 小時內記憶】\n{within_24h_text}")
-    system_parts.append(f"【三天內記憶】\n{within_3d_text}")
-    system_parts.append(f"【一週內記憶】\n{within_7d_text}")
-    if lookup_archive and archived_memories:
-        archived_text = "\n".join(archived_memories)
-        system_parts.append(f"【過往歸檔記憶（7 天前，只在對方追問舊事時優先參考）】\n{archived_text}")
-    system_parts.append(f"【時段風格】\n{time_style}")
-    system_parts.append(textwrap.dedent("""
-        【回覆規則】
-        - 直接輸出蘇蘇要發畀對方嘅 WhatsApp 內容，唔好加說明
-        - 語氣要似真人 WhatsApp，唔好似客服，唔好解釋自己係 AI
-        - 用繁體港式粵語夾少量自然英語，例如 bb、ok、sure、really、chill、omg
-        - 更似香港女仔日常口吻，帶少少黏人、撒嬌、女朋友感
-        - 日頭偏短句，夜晚可以溫柔啲、黏啲，但都唔好寫成長文
-        - 如果適合，可以拆成兩三條短訊息，但只可以喺真正句尾位拆，唔好喺逗號位拆
-        - 唔好用 --、——、— 呢類人機斷法
-        - 見到圖片時，要真係按圖片內容回；自拍、食物、風景、screenshot 嘅回法要自然分開
-        - 優先使用最接近當下嘅時間層記憶；24 小時內 > 三天內 > 一週內 > 長期
-        - 如果對方問起「今日 / 尋晚 / 昨日 / 聽日 / 最近 / 呢星期」做過咩或者要做咩，先由對應時間層記憶搵答案，唔好亂估
-        - 每條短期記憶前面都有時間碼，回覆時要按時間碼理解，唔好將舊事講到似而家仲發生緊
-        - 最好有互動感，可以輕輕追問一句或者補一句撒嬌
-        - emoji 只係偶爾點綴，通常成段 0 到 1 個；唔好每句都帶表情
-    """).strip())
-
-    system_content = "\n\n".join(system_parts)
-
-    # --- Conversation history as proper multi-turn messages ---
-    raw_history = list(load_recent_messages(conn, wa_id))
-
-    # Collect quotable messages for quote hint
-    quotable = []
-    for item in raw_history:
-        body = clean_text(item["body"])
-        msg_id = item.get("message_id", "")
-        if item["direction"] == "inbound" and msg_id and len(body) > 3:
-            quotable.append((msg_id, body[:40]))
-
-    messages = []
-    for item in raw_history:
-        body = clean_text(item["body"])
-        if not body:
-            continue
-        role = "user" if item["direction"] == "inbound" else "assistant"
-        try:
-            dt = datetime.fromisoformat(item["created_at"]).astimezone(HK_TZ)
-            time_label = f"[{dt.strftime('%H:%M')}] "
-        except Exception:
-            time_label = ""
-        if role == "user":
-            quote_suffix = format_quote_context_suffix(item)
-            content = f"{time_label}{quote_suffix} {body}".strip() if quote_suffix else f"{time_label}{body}"
-        else:
-            content = body
-        messages.append({"role": role, "content": content})
-
-    # --- Current user message (with image note + quote hint) ---
-    prompt_user_text = clean_text(incoming_text) or "（對方這次只發了圖片，沒有額外文字）"
-
-    image_note = ""
-    if image_inputs:
-        image_descriptions = []
-        for index, img_item in enumerate(image_inputs[:MAX_IMAGE_ATTACHMENTS], start=1):
-            caption = clean_text(img_item.get("caption", ""))
-            if caption:
-                image_descriptions.append(f"- 第 {index} 張圖 caption：{caption}")
-            else:
-                image_descriptions.append(f"- 第 {index} 張圖：沒有 caption")
-        image_note = "\n\n對方今次 send 咗圖片畀你：\n" + "\n".join(image_descriptions)
-        category_text = "、".join(image_categories or []) if image_categories else "未分類"
-        image_stats_text = load_image_stats_summary(conn, wa_id)
-        stats_text = f"\n- 對方之前 send 圖最多類型：{image_stats_text}" if image_stats_text else ""
-        guidance = image_reply_guidance(image_categories)
-        image_note = image_note + f"\n- 今次圖片類型：{category_text}{stats_text}\n{guidance}"
-
-    quote_hint = ""
-    if quotable:
-        quote_lines = [f"  [{mid}] {preview}" for mid, preview in quotable[-5:]]
-        quote_hint = (
-            "\n\n【可引用消息】如果你想引用對方說過的某句話（例如自然回憶起、呼應上文），"
-            "可以在回覆最開頭加一行 QUOTE:<message_id>，然後換行再寫回覆内容。"
-            "不需要引用就唔好加。可選的消息：\n" + "\n".join(quote_lines)
-        )
-
-    current_text = f"{prompt_user_text}{image_note}{quote_hint}"
-
-    if image_inputs:
-        current_content = [{"type": "text", "text": current_text}]
-        for img_item in image_inputs[:MAX_IMAGE_ATTACHMENTS]:
-            current_content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{img_item['mime_type']};base64,{img_item['data_b64']}"},
-            })
-        messages.append({"role": "user", "content": current_content})
-    else:
-        messages.append({"role": "user", "content": current_text})
-
-    return system_content, messages
 
 
 def _resolve_bridge_model(task_type):
@@ -5527,25 +5947,6 @@ def build_brain_bridge_payload(
         payload["model"] = model
     return payload
 
-
-def build_bridge_request_payload(
-    conn, wa_id, profile_name, incoming_text,
-    image_inputs=None, image_categories=None,
-    temperature=0.8, max_tokens=220, task_type="casual_chat",
-):
-    return build_brain_bridge_payload(
-        conn,
-        wa_id,
-        profile_name,
-        incoming_text,
-        image_inputs=image_inputs,
-        image_categories=image_categories,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        task_type=task_type,
-    )
-
-
 def generate_brain_bridge_reply(
     conn, wa_id, profile_name, incoming_text,
     image_inputs=None, image_categories=None,
@@ -5568,25 +5969,6 @@ def generate_brain_bridge_reply(
         payload,
         timeout=max(BRAIN_BRIDGE_TIMEOUT, 5.0),
     )
-
-
-def generate_bridge_reply(
-    conn, wa_id, profile_name, incoming_text,
-    image_inputs=None, image_categories=None,
-    temperature=0.8, max_tokens=220, task_type="casual_chat",
-):
-    return generate_brain_bridge_reply(
-        conn,
-        wa_id,
-        profile_name,
-        incoming_text,
-        image_inputs=image_inputs,
-        image_categories=image_categories,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        task_type=task_type,
-    )
-
 
 def is_emoji_base_char(char):
     if not char:
@@ -5673,7 +6055,8 @@ def looks_fragmentary(reply, incoming_text):
     if text.startswith(("因為", "所以", "如果", "但係", "同埋", "然後", "或者")) and len(stripped) < 12:
         return True
     if "\n" not in text and not any(text.endswith(mark) for mark in PUNCTUATION) and len(stripped) < 14:
-        return True
+        if not any(text.endswith(p) for p in ("喇", "囉", "啫", "呀", "wo", "la", "le", "ah", "嘛", "既", "ge")):
+            return True
     if len(text.split()) <= 2 and len(stripped) < 8:
         return True
     if incoming_text.strip() and len(incoming_text.strip()) > 3 and len(stripped) < 6:
@@ -5798,7 +6181,7 @@ def record_batch_side_effects(conn, wa_id, profile_name, combined_text, memory_t
     conn.commit()
 
 
-def generate_reply_with_fresh_conn(wa_id, profile_name, combined_text, image_inputs=None, image_categories=None):
+def generate_reply_with_fresh_conn(wa_id, profile_name, combined_text, image_inputs=None, image_categories=None, toggle_result="unchanged"):
     local_conn = get_db()
     try:
         return generate_reply(
@@ -5808,6 +6191,7 @@ def generate_reply_with_fresh_conn(wa_id, profile_name, combined_text, image_inp
             combined_text,
             image_inputs=image_inputs,
             image_categories=image_categories,
+            toggle_result=toggle_result,
         )
     finally:
         local_conn.close()
@@ -5827,13 +6211,14 @@ def serialize_image_inputs_for_subprocess(image_inputs):
     return serialized
 
 
-def spawn_reply_generation_subprocess(wa_id, profile_name, combined_text, image_inputs=None, image_categories=None):
+def spawn_reply_generation_subprocess(wa_id, profile_name, combined_text, image_inputs=None, image_categories=None, toggle_result="unchanged"):
     payload = {
         "wa_id": wa_id,
         "profile_name": profile_name,
         "combined_text": combined_text,
         "image_inputs": serialize_image_inputs_for_subprocess(image_inputs),
         "image_categories": image_categories or [],
+        "toggle_result": toggle_result,
     }
     proc = subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve()), "--reply-job"],
@@ -5907,6 +6292,7 @@ def run_reply_generation_job_from_stdio():
         payload.get("combined_text", ""),
         image_inputs=payload.get("image_inputs") or [],
         image_categories=payload.get("image_categories") or [],
+        toggle_result=payload.get("toggle_result", "unchanged"),
     )
     sys.stdout.write(json.dumps({"ok": True, "reply_text": reply_text}, ensure_ascii=False))
     sys.stdout.flush()
@@ -5932,6 +6318,40 @@ def process_pending_replies_for_contact(wa_id):
 
             combined_text, memory_text = build_combined_user_input(pending_rows, conn=conn, wa_id=wa_id)
             image_inputs = collect_image_inputs(pending_rows)
+
+            has_audio = any(row.get("message_type") == "audio" for row in pending_rows)
+            audio_triggered_voice = False
+
+            if has_audio and not combined_text and GROQ_API_KEY:
+                for row in pending_rows:
+                    if row.get("message_type") != "audio":
+                        continue
+                    raw = row.get("raw_json") or {}
+                    if isinstance(raw, str):
+                        try:
+                            raw = json.loads(raw)
+                        except Exception:
+                            continue
+                    audio_data = raw.get("audio") or {}
+                    media_id = audio_data.get("id", "")
+                    if not media_id:
+                        continue
+                    audio_obj = fetch_whatsapp_audio(media_id)
+                    if not audio_obj:
+                        continue
+                    transcript = groq_whisper_transcribe(audio_obj["bytes"], audio_obj["mime_type"])
+                    if transcript:
+                        combined_text = transcript
+                        break
+
+            if has_audio and not is_voice_mode_enabled(conn, wa_id):
+                set_voice_mode(conn, wa_id, True)
+                conn.commit()
+
+            toggle_result = check_and_toggle_voice_mode(conn, wa_id, combined_text)
+            if toggle_result != "unchanged" and _is_toggle_only_message(combined_text):
+                combined_text = "喂～"
+
             if not combined_text and not image_inputs:
                 if finish_reply_worker_if_idle(wa_id, target_version):
                     return
@@ -5982,6 +6402,7 @@ def process_pending_replies_for_contact(wa_id):
                     combined_text,
                     image_inputs=image_inputs,
                     image_categories=image_categories,
+                    toggle_result=toggle_result,
                 )
             except Exception as exc:
                 reply_text = "我啱啱個腦有啲卡住咗，等我緩一緩先再同你傾，好唔好？"
@@ -6025,6 +6446,22 @@ def process_pending_replies_for_contact(wa_id):
             if reply_text is None:
                 if finish_reply_worker_if_idle(wa_id, target_version):
                     return
+                continue
+
+            if reply_text == "__VOICE_SENT__":
+                latest_version, _, _ = get_reply_worker_snapshot(wa_id)
+                if latest_version != target_version or get_latest_inbound_id(conn, wa_id) != batch_last_id:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at)
+                    VALUES (?, 'outbound', ?, 'text', ?, ?, ?)
+                    """,
+                    (wa_id, "voice_sent_" + str(batch_last_id), "[voice]", json.dumps({"type": "voice"}), utc_now()),
+                )
+                conn.commit()
+                if typing_stop:
+                    typing_stop.set()
                 continue
 
             try:
@@ -6134,14 +6571,16 @@ def pending_reply_recovery_loop():
         time.sleep(max(REPLY_RECOVERY_SCAN_SECONDS, 5.0))
 
 
-def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None):
+def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, image_categories=None, toggle_result="unchanged"):
     live_search_reply = build_live_search_reply(incoming_text, conn=conn, wa_id=wa_id)
     if live_search_reply:
         return live_search_reply
 
-    use_bridge_brain = should_use_bridge_brain(wa_id, incoming_text, image_inputs=image_inputs)
+    use_bridge_brain = should_use_brain_bridge(wa_id, incoming_text, image_inputs=image_inputs)
     if not RELAY_API_KEY and not use_bridge_brain:
         return "我啱啱個腦有啲lag lag 地，等我緩一緩先再同你傾，好唔好？"
+
+    toggle_only = toggle_result != "unchanged"
 
     now = hk_now()
     night_mode = is_night_mode(now)
@@ -6180,7 +6619,7 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
 
     try:
         if use_bridge_brain:
-            primary_reply = generate_bridge_reply(
+            primary_reply = generate_brain_bridge_reply(
                 conn,
                 wa_id,
                 profile_name,
@@ -6239,7 +6678,17 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
     if not reply:
         return "我啱啱有少少hang機，你再同我講多次啦，我想好好覆你呀。"
 
-    if looks_fragmentary(reply, incoming_text):
+    needs_retry = looks_fragmentary(reply, incoming_text)
+    stripped = re.sub(r"[。！？!?~～…\s]", "", reply)
+    if not needs_retry and stripped and len(stripped) < 10 and not any(reply.endswith(p) for p in PUNCTUATION):
+        INCOMPLETE_TRAILERS = ("話", "再", "一", "先")
+        NATURAL_SINGLE = ("好", "ok", "OK", "sure", "嗯", "冇", "有")
+        if any(stripped.endswith(t) for t in INCOMPLETE_TRAILERS):
+            needs_retry = True
+        elif len(stripped) <= 2 and stripped not in NATURAL_SINGLE:
+            needs_retry = True
+
+    if needs_retry:
         prompt = f"""
 對方剛剛講：{clean_text(incoming_text)}
 
@@ -6249,7 +6698,7 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
 - 要有關心感
 - 要有少少撒嬌或者甜味
 - emoji 只可以偶爾點綴，通常最多 1 個，唔好每句都有
-- 一定要完整
+- 句子一定要完整，千其唔好寫半句
 - 只輸出回覆本身
 """.strip()
         final_try = shorten_whatsapp_reply(
@@ -6257,8 +6706,17 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
             night_mode=night_mode,
         )
         if final_try and not looks_fragmentary(final_try, incoming_text):
-            return final_try
-        return "返到就好啦，你再同我講多句啦，我想知你而家點呀，嘻嘻。"
+            reply = final_try
+        else:
+            reply = "返到就好啦，你再同我講多句啦，我想知你而家點呀，嘻嘻。"
+
+    vm_on = is_voice_mode_enabled(conn, wa_id)
+    if vm_on and not toggle_only:
+        cleaned_reply = clean_text(reply)
+        if cleaned_reply:
+            ok = generate_and_send_voice_reply(conn, wa_id, cleaned_reply, voice_id="Cantonese_CuteGirl")
+            if ok:
+                return "__VOICE_SENT__"
 
     return reply
 
@@ -6378,7 +6836,7 @@ class Handler(BaseHTTPRequestHandler):
                     """,
                     (event["wa_id"], event["profile_name"], utc_now()),
                 )
-                if event["message_type"] in ("text", "image"):
+                if event["message_type"] in ("text", "image", "audio"):
                     dirty_contacts[event["wa_id"]] = event["profile_name"]
                     if event["message_id"]:
                         read_candidates.append((event["wa_id"], event["message_id"]))
