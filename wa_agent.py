@@ -3142,9 +3142,9 @@ def groq_whisper_transcribe(audio_bytes, mime_type="audio/ogg"):
     def part(name, value, ctype=None):
         ctype_line = f"Content-Type: {ctype}\r\n" if ctype else ""
         return (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{name}"'
-            + (f'; filename="{filename}"' if name == "file" else "")
+            f"--{boundary}\r\n".encode()
+            + f'Content-Disposition: form-data; name="{name}"'.encode()
+            + (f'; filename="{filename}"'.encode() if name == "file" else b"")
             + f"\r\n{ctype_line}\r\n".encode()
             + value
             + b"\r\n"
