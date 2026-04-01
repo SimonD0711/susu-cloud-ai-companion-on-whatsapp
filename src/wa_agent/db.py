@@ -14,7 +14,7 @@ from pathlib import Path as PathType
 sys.path.insert(0, str(PathType(__file__).parent.parent.parent))
 
 
-SUSU_SETTINGS_TABLE = "susu_runtime_settings"
+SUSU_SETTINGS_TABLE = "wa_susu_settings"
 SHORT_TERM_MEMORY_RETENTION_HOURS = 168
 
 
@@ -550,12 +550,18 @@ class MemoryDB:
         )
         return True
 
-    def get_pending_reminders(self, wa_id: str, now_iso: str) -> list[dict]:
-        """Get pending reminders that should fire (remind_at <= now_iso)."""
-        rows = self.execute(
-            "SELECT id, remind_at, content FROM wa_reminders WHERE wa_id=? AND fired=0 AND remind_at <= ? ORDER BY remind_at ASC",
-            (wa_id, now_iso),
-        ).fetchall()
+    def get_pending_reminders(self, wa_id: str | None, now_iso: str) -> list[dict]:
+        """Get pending reminders that should fire (remind_at <= now_iso). Pass wa_id=None for all users."""
+        if wa_id is not None:
+            rows = self.execute(
+                "SELECT id, wa_id, remind_at, content FROM wa_reminders WHERE wa_id=? AND fired=0 AND remind_at <= ? ORDER BY remind_at ASC",
+                (wa_id, now_iso),
+            ).fetchall()
+        else:
+            rows = self.execute(
+                "SELECT id, wa_id, remind_at, content FROM wa_reminders WHERE fired=0 AND remind_at <= ? ORDER BY remind_at ASC",
+                (now_iso,),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def mark_reminder_fired(self, reminder_id: int) -> bool:
