@@ -503,7 +503,7 @@ def create_susu_memory(wa_id, content, kind="manual"):
         conn.close()
 
 
-def update_susu_memory(entry_id, content, kind=""):
+def update_susu_memory(entry_id, content, kind="", importance=None):
     entry_id = int(entry_id or 0)
     content = susu_clean_text(content)
     if not entry_id or not content:
@@ -526,13 +526,20 @@ def update_susu_memory(entry_id, content, kind=""):
             (row["wa_id"], next_key, entry_id),
         ).fetchone()
         if duplicate:
+            dup_importance = conn.execute(
+                "SELECT importance FROM wa_memories WHERE id = ?",
+                (duplicate["id"],),
+            ).fetchone()
+            merged_importance = dup_importance["importance"]
+            if importance is not None and importance > (merged_importance or 0):
+                merged_importance = importance
             conn.execute(
                 """
                 UPDATE wa_memories
-                SET kind = ?, content = ?, updated_at = ?
+                SET kind = ?, content = ?, updated_at = ?, importance = ?
                 WHERE id = ?
                 """,
-                (next_kind, content, now, duplicate["id"]),
+                (next_kind, content, now, merged_importance, duplicate["id"]),
             )
             conn.execute("DELETE FROM wa_memories WHERE id = ?", (entry_id,))
             target_id = duplicate["id"]
@@ -540,10 +547,10 @@ def update_susu_memory(entry_id, content, kind=""):
             conn.execute(
                 """
                 UPDATE wa_memories
-                SET kind = ?, content = ?, memory_key = ?, updated_at = ?
+                SET kind = ?, content = ?, memory_key = ?, updated_at = ?, importance = ?
                 WHERE id = ?
                 """,
-                (next_kind, content, next_key, now, entry_id),
+                (next_kind, content, next_key, now, importance if importance is not None else row.get("importance"), entry_id),
             )
             target_id = entry_id
         conn.commit()
