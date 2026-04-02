@@ -6686,7 +6686,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             dirty_contacts = {}
             read_candidates = []
-            for event in extract_text_messages(payload):
+            import sys; sys.stderr.write(f"[DEBUG] webhook payload keys={list(payload.keys()) if isinstance(payload, dict) else 'N/A'}\n"); sys.stderr.flush()
+            events = extract_text_messages(payload)
+            import sys; sys.stderr.write(f"[DEBUG] extract_text_messages returned {len(events)} events\n"); sys.stderr.flush()
+            for event in events:
                 if has_processed_message(conn, event["message_id"]):
                     continue
 
