@@ -387,6 +387,28 @@
 
     .empty-state { text-align: center; color: var(--muted); padding: 40px 0; font-size: 15px; }
 
+    .batch-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: #fff3f0;
+      border-radius: 10px;
+      margin-bottom: 10px;
+      font-size: 14px;
+    }
+    .batch-toolbar #batch-count { font-weight: 600; color: var(--text); }
+    .batch-toolbar button {
+      background: var(--accent); color: #fff;
+      border: none; border-radius: 6px;
+      padding: 4px 12px; cursor: pointer; font-size: 13px;
+    }
+    .batch-toolbar button.danger-btn { background: var(--danger); }
+
+    .entry-body.collapsed { display: none; }
+
+    mark.hl { background: #ffeb3b; color: #000; border-radius: 2px; padding: 0 2px; }
+
     @media (max-width: 700px) {
       .site-header { border-radius: 28px; flex-direction: column; align-items: flex-start; }
       .header-actions { justify-content: flex-start; }
@@ -474,6 +496,13 @@
       <div class="section-meta" id="section-meta">長期記憶：由苏苏長期記住的內容</div>
     </div>
 
+    <div class="batch-toolbar" id="batch-toolbar" hidden>
+      <span id="batch-count">已選 0 項</span>
+      <button id="batch-select-all" type="button">全選</button>
+      <button id="batch-deselect-all" type="button">取消全選</button>
+      <button class="danger-btn" id="batch-delete-btn" type="button">刪除所選</button>
+    </div>
+
     <div class="entries-grid" id="entries-grid">
       <div class="empty-state" id="loading-msg">載入中...</div>
     </div>
@@ -492,6 +521,17 @@
       <div class="modal-field">
         <label>內容</label>
         <textarea id="edit-content" spellcheck="false"></textarea>
+      </div>
+      <div class="modal-field">
+        <label>重要性（影響記憶被選中的優先級）</label>
+        <div class="importance-picker" id="edit-importance-picker" style="display:flex;gap:4px;align-items:center;">
+          <button type="button" class="star-btn" data-val="1" style="background:none;border:none;cursor:pointer;font-size:18px;color:#d4a017;">★</button>
+          <button type="button" class="star-btn" data-val="2" style="background:none;border:none;cursor:pointer;font-size:18px;color:#d4a017;">★</button>
+          <button type="button" class="star-btn" data-val="3" style="background:none;border:none;cursor:pointer;font-size:18px;color:#d4a017;">★</button>
+          <button type="button" class="star-btn" data-val="4" style="background:none;border:none;cursor:pointer;font-size:18px;color:#d4a017;">★</button>
+          <button type="button" class="star-btn" data-val="5" style="background:none;border:none;cursor:pointer;font-size:18px;color:#d4a017;">★</button>
+        </div>
+        <input type="hidden" id="edit-importance">
       </div>
       <div class="error-text" id="edit-err"></div>
       <div class="modal-actions">
@@ -612,6 +652,13 @@
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  function hl(text, term) {
+    if (!term || !text) return esc(text);
+    const safe = esc(text);
+    const regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    return safe.replace(regex, '<mark class="hl">$&</mark>');
   }
 
   function fmt(iso) {
@@ -794,24 +841,44 @@
   }
 
   function renderEntry(item) {
+    function importanceStars(val) {
+      const n = val || 3;
+      let html = '<div class="importance-stars">';
+      for (let i = 1; i <= 5; i++) {
+        html += `<span class="star ${i <= n ? '' : 'empty'}">★</span>`;
+      }
+      html += '</div>';
+      return html;
+    }
+    function sourceBadge(kind) {
+      const cls = kind === 'auto' ? 'auto' : kind === 'setting' ? 'setting' : 'manual';
+      const label = kind === 'auto' ? 'LLM抽取' : kind === 'setting' ? '系統設定' : '手動新增';
+      return `<span class="source-badge ${cls}">${esc(label)}</span>`;
+    }
+
     if (activeTab === 'long') {
       return `
-<div class="entry-card">
+<div class="entry-card" data-entry-id="${item.id}">
   <div class="entry-header">
+    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+      <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="memory">
+    </div>
     <div class="entry-meta">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="entry-key memory">${esc(item.kind || 'manual')}</span>
+        ${sourceBadge(item.kind)}
         ${badgeHtml(`Key: ${item.memory_key || '—'}`)}
+        ${importanceStars(item.importance)}
       </div>
       <span class="entry-user">${esc(item.wa_id)}</span>
       <span class="entry-time">建立：${fmt(item.created_at)} ・ 更新：${fmt(item.updated_at)}</span>
     </div>
     <div class="entry-actions">
+      <button class="entry-btn expand-btn" title="展開/摺疊">⬇</button>
       <button class="entry-btn edit-btn" title="編輯" data-id="${item.id}">✏️</button>
       <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="memory" data-label="這條長期記憶">🗑️</button>
     </div>
   </div>
-  <div class="entry-body">${esc(item.content)}</div>
+  <div class="entry-body collapsed">${hl(item.content, searchText.trim())}</div>
 </div>`;
     }
 
@@ -819,6 +886,9 @@
       return `
 <div class="entry-card">
   <div class="entry-header">
+    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+      <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="session">
+    </div>
     <div class="entry-meta">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span class="entry-key session">${esc(item.bucket_label || item.bucket || 'within_7d')}</span>
@@ -828,10 +898,35 @@
       <span class="entry-time">時間碼：${fmt(item.observed_at || item.updated_at)} ・ 更新：${fmt(item.updated_at)} ・ 到期：${fmt(item.expires_at)}</span>
     </div>
     <div class="entry-actions">
+      <button class="entry-btn expand-btn" title="展開/摺疊">⬇</button>
       <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="session" data-label="這條短期記憶">🗑️</button>
     </div>
   </div>
-  <div class="entry-body">${esc(item.content)}</div>
+  <div class="entry-body collapsed">${hl(item.content, searchText.trim())}</div>
+</div>`;
+    }
+
+    if (activeTab === 'archive') {
+      return `
+<div class="entry-card">
+  <div class="entry-header">
+    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+      <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="archive">
+    </div>
+    <div class="entry-meta">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="entry-key session">${esc(item.source_bucket_label || item.source_bucket || 'within_7d')}</span>
+        ${badgeHtml('已歸檔', 'expired')}
+      </div>
+      <span class="entry-user">${esc(item.wa_id)}</span>
+      <span class="entry-time">發生：${fmt(item.observed_at || item.updated_at)} · 歸檔：${fmt(item.archived_at)}</span>
+    </div>
+    <div class="entry-actions">
+      <button class="entry-btn expand-btn" title="展開/摺疊">⬇</button>
+      <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="archive" data-label="這條歸檔記憶">🗑️</button>
+    </div>
+  </div>
+  <div class="entry-body collapsed">${hl(item.content, searchText.trim())}</div>
 </div>`;
     }
 
@@ -870,7 +965,7 @@
       <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="reminder" data-label="這條提醒事項">🗑️</button>
     </div>
   </div>
-  <div class="entry-body">${esc(item.content)}</div>
+  <div class="entry-body collapsed">${hl(item.content, searchText.trim())}</div>
 </div>`;
   }
 
@@ -917,7 +1012,54 @@
       btn.addEventListener('click', () => openDelete(Number(btn.dataset.id), btn.dataset.type, btn.dataset.label)));
     document.querySelectorAll('.reminder-edit-btn').forEach(btn =>
       btn.addEventListener('click', () => openReminderEdit(Number(btn.dataset.id))));
+    document.querySelectorAll('.expand-btn').forEach(btn =>
+      btn.addEventListener('click', () => {
+        const card = btn.closest('.entry-card');
+        card.querySelector('.entry-body').classList.toggle('collapsed');
+      }));
+    const batchTabs = ['long', 'session', 'archive'];
+    document.getElementById('batch-toolbar').hidden = !batchTabs.includes(activeTab);
+    document.querySelectorAll('.batch-checkbox').forEach(cb => {
+      cb.addEventListener('change', updateBatchCount);
+    });
+    updateBatchCount();
   }
+
+  function updateBatchCount() {
+    const checked = document.querySelectorAll('.batch-checkbox:checked');
+    document.getElementById('batch-count').textContent = `已選 ${checked.length} 項`;
+  }
+
+  document.getElementById('batch-select-all')?.addEventListener('click', () => {
+    document.querySelectorAll('.batch-checkbox').forEach(cb => cb.checked = true);
+    updateBatchCount();
+  });
+  document.getElementById('batch-deselect-all')?.addEventListener('click', () => {
+    document.querySelectorAll('.batch-checkbox').forEach(cb => cb.checked = false);
+    updateBatchCount();
+  });
+  document.getElementById('batch-delete-btn')?.addEventListener('click', async () => {
+    const checked = [...document.querySelectorAll('.batch-checkbox:checked')];
+    if (!checked.length) return;
+    if (!confirm(`確定要刪除 ${checked.length} 條記憶嗎？此操作無法撤銷。`)) return;
+    const errors = [];
+    for (const cb of checked) {
+      try {
+        await apiFetch('/memory/delete', {
+          method: 'POST',
+          body: JSON.stringify({ id: Number(cb.dataset.id), type: cb.dataset.tab || 'memory' }),
+        });
+      } catch (e) {
+        errors.push(`ID ${cb.dataset.id}: ${e.message}`);
+      }
+    }
+    if (errors.length) alert('部分刪除失敗：' + errors.join('; '));
+    await loadMemory();
+  });
+
+  document.getElementById('expand-all-btn')?.addEventListener('click', () => {
+    document.querySelectorAll('.entry-body.collapsed').forEach(el => el.classList.remove('collapsed'));
+  });
 
   async function loadMemory(waId = '') {
     statusNote.textContent = '正在讀取目前 WhatsApp 版苏苏的資料...';
@@ -1001,6 +1143,19 @@
   const editWa = document.getElementById('edit-wa');
   const editContent = document.getElementById('edit-content');
   const editErr = document.getElementById('edit-err');
+  const editImportanceInput = document.getElementById('edit-importance');
+  const importancePicker = document.getElementById('edit-importance-picker');
+
+  function setEditImportance(val) {
+    editImportanceInput.value = val;
+    importancePicker.querySelectorAll('.star-btn').forEach(btn => {
+      btn.style.opacity = Number(btn.dataset.val) <= val ? '1' : '0.25';
+    });
+  }
+
+  importancePicker.querySelectorAll('.star-btn').forEach(btn => {
+    btn.addEventListener('click', () => setEditImportance(Number(btn.dataset.val)));
+  });
 
   function openEdit(id) {
     const entry = (payload?.long_term_memories || []).find(item => item.id === id);
@@ -1009,6 +1164,7 @@
     editWa.value = entry.wa_id;
     editContent.value = entry.content || '';
     editErr.textContent = '';
+    setEditImportance(entry.importance || 0);
     editModal.classList.add('is-open');
     editContent.focus();
   }
@@ -1019,7 +1175,7 @@
     try {
       await apiFetch('/memory/update', {
         method: 'POST',
-        body: JSON.stringify({ id: Number(editId.value), content: editContent.value }),
+        body: JSON.stringify({ id: Number(editId.value), content: editContent.value, importance: Number(editImportanceInput.value) || 0 }),
       });
       editModal.classList.remove('is-open');
       await loadMemory();
