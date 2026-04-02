@@ -103,6 +103,8 @@ _reply_worker_states = {}
 _reply_worker_states_lock = threading.Lock()
 _read_scheduler_states = {}
 _read_scheduler_states_lock = threading.Lock()
+_last_memory_extraction = 0.0
+_MEMORY_EXTRACTION_COOLDOWN = 300.0  # 5 minutes
 
 WEATHER_QUERY_KEYWORDS = (
     "天氣", "天气", "weather", "氣溫", "气温", "幾度", "几度", "落雨", "落唔落雨",
@@ -485,6 +487,8 @@ ARCHIVE_LOOKUP_TIME_MARKERS = (
     "之前", "以前", "前排", "早排", "上星期", "上周", "上禮拜", "上礼拜",
     "上個星期", "上个星期", "上個禮拜", "上个礼拜", "上個月", "上个月", "上月",
     "早幾日", "早几日", "嗰陣", "那陣", "嗰次", "那次",
+    "上次", "上次到", "上次去", "上上次", "尋晚", "尋日", "琴晚", "琴日",
+    "頭先", "頭先到", "頭先去",
 )
 MEMORY_RECALL_MARKERS = (
     "記唔記得", "仲記唔記得", "記得唔記得", "我之前", "我以前",
@@ -924,12 +928,41 @@ def get_current_location(conn, wa_id):
         return None
     try:
         row = conn.execute(
-            "SELECT content FROM wa_memories WHERE wa_id=? AND memory_key='current_location' LIMIT 1",
+            "SELECT content, updated_at FROM wa_memories WHERE wa_id=? AND memory_key='current_location' LIMIT 1",
             (wa_id,),
         ).fetchone()
-        return row["content"] if row else None
+        if not row:
+            return None
+        return {"content": row["content"], "updated_at": row["updated_at"]}
     except Exception:
         return None
+
+def format_location_with_context(location):
+    if not location:
+        return None
+    content = location.get("content")
+    updated_at = location.get("updated_at")
+    if not content:
+        return None
+    if updated_at:
+        try:
+            loc_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            now_dt = datetime.now(timezone.utc)
+            days = (now_dt - loc_dt.astimezone(timezone.utc)).days
+            if days == 0:
+                suffix = "（今日）"
+            elif days == 1:
+                suffix = "（1日前）"
+            elif days < 7:
+                suffix = f"（{days}日前）"
+            elif days < 30:
+                suffix = f"（{days}日前，可能已搬遷）"
+            else:
+                suffix = f"（{days}日前，已搬遷）"
+            return content + suffix
+        except Exception:
+            pass
+    return content
 
 def maybe_update_user_location(conn, wa_id, text):
     if not conn or not wa_id:
@@ -2725,7 +2758,7 @@ def build_live_search_reply(incoming_text, conn=None, wa_id=""):
 
 def normalize_key(value):
     value = clean_text(value).lower()
-    value = re.sub(r"[^\w\u4e00-\u9fff]+", "", value)
+    value = re.sub(r"[\s\-_.,!?~]+", "", value)
     return value[:160]
 
 
@@ -4677,6 +4710,10 @@ def image_reply_guidance(categories):
 
 
 def maybe_extract_memories(conn, wa_id, profile_name, incoming_text):
+    global _last_memory_extraction
+    if time.time() - _last_memory_extraction < _MEMORY_EXTRACTION_COOLDOWN:
+        return []
+    _last_memory_extraction = time.time()
     existing = [item["content"] for item in load_memories(conn, wa_id)]
     existing_text = "\n".join(f"- {item}" for item in existing) if existing else "（暫時未有）"
     prompt = f"""
@@ -4741,7 +4778,18 @@ def maybe_extract_memories(conn, wa_id, profile_name, incoming_text):
 
     saved = []
     for item in deduped[:4]:
-        if is_long_term_memory_candidate(item["content"]) and upsert_memory(conn, wa_id, item["content"], kind="auto", importance=item["importance"]):
+        if not is_long_term_memory_candidate(item["content"]):
+            continue
+        key = normalize_key(item["content"])
+        existing = conn.execute(
+            "SELECT importance FROM wa_memories WHERE wa_id=? AND memory_key=? LIMIT 1",
+            (wa_id, key),
+        ).fetchone()
+        if existing:
+            boosted = min((existing["importance"] or 3) + 1, 5)
+        else:
+            boosted = item["importance"]
+        if upsert_memory(conn, wa_id, item["content"], kind="auto", importance=boosted):
             saved.append(item)
     if saved:
         conn.commit()
@@ -5800,7 +5848,8 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
 
     persona_block = normalize_runtime_multiline(settings.get("system_persona"), SYSTEM_PERSONA)
     core_profile_block = build_core_profile_memory_text(primary_text) if primary_text else ""
-    current_location = get_current_location(conn, wa_id) if conn else None
+    raw_location = get_current_location(conn, wa_id) if conn else None
+    current_location = format_location_with_context(raw_location)
     memory_block = {
         "primary_profile": core_profile_block,
         "long_term": selected["selected_long_term"],
