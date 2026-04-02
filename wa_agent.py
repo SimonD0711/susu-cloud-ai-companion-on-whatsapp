@@ -3158,10 +3158,11 @@ def groq_whisper_transcribe(audio_bytes, mime_type="audio/ogg"):
 
     try:
         req = Request(
-            "http://127.0.0.1:3002/openai/v1/audio/transcriptions",
+            "https://relay-proxy.simonding711.workers.dev/openai/v1/audio/transcriptions",
             data=body,
             headers={
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Authorization": f"Bearer {GROQ_API_KEY}",
             },
             method="POST",
         )
@@ -6686,10 +6687,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             dirty_contacts = {}
             read_candidates = []
-            import sys; sys.stderr.write(f"[DEBUG] webhook payload keys={list(payload.keys()) if isinstance(payload, dict) else 'N/A'}\n"); sys.stderr.flush()
-            events = extract_text_messages(payload)
-            import sys; sys.stderr.write(f"[DEBUG] extract_text_messages returned {len(events)} events\n"); sys.stderr.flush()
-            for event in events:
+            for event in extract_text_messages(payload):
                 if has_processed_message(conn, event["message_id"]):
                     continue
 
