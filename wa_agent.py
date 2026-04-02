@@ -3109,7 +3109,10 @@ def fetch_whatsapp_image(media_id):
 def fetch_whatsapp_audio(media_id):
     if not media_id or not ACCESS_TOKEN:
         return None
-    metadata = graph_get_json(media_id)
+    try:
+        metadata = graph_get_json(media_id)
+    except Exception:
+        return None
     media_url = metadata.get("url")
     mime_type = metadata.get("mime_type", "")
     if not media_url:
@@ -3163,6 +3166,7 @@ def groq_whisper_transcribe(audio_bytes, mime_type="audio/ogg"):
             headers={
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
                 "Authorization": f"Bearer {GROQ_API_KEY}",
+                "User-Agent": "Mozilla/5.0 (compatible; WhatsApp/2.24)",
             },
             method="POST",
         )
@@ -6233,6 +6237,7 @@ def process_pending_replies_for_contact(wa_id):
 
             has_audio = any(row.get("message_type") == "audio" for row in pending_rows)
             audio_triggered_voice = False
+            audio_transcribe_attempted = False
 
             if has_audio and not combined_text and GROQ_API_KEY:
                 for row in pending_rows:
@@ -6251,6 +6256,7 @@ def process_pending_replies_for_contact(wa_id):
                     audio_obj = fetch_whatsapp_audio(media_id)
                     if not audio_obj:
                         continue
+                    audio_transcribe_attempted = True
                     transcript = groq_whisper_transcribe(audio_obj["bytes"], audio_obj["mime_type"])
                     if transcript:
                         combined_text = transcript
@@ -6265,6 +6271,23 @@ def process_pending_replies_for_contact(wa_id):
                 combined_text = "喂～"
 
             if not combined_text and not image_inputs:
+                if has_audio and audio_transcribe_attempted:
+                    reply_text = "收到語音了，不過我暫時翻唔到內容，下次可以試下send文字比我"
+                else:
+                    reply_text = None
+                if reply_text:
+                    batch_last_id = pending_rows[-1]["id"]
+                    batch_last_message_id = clean_text(pending_rows[-1].get("message_id"))
+                    try:
+                        send_whatsapp_text(wa_id, reply_text)
+                    except Exception:
+                        pass
+                    conn.execute(
+                        "INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at) "
+                        "VALUES (?, 'outbound', ?, 'text', ?, '{}', ?)",
+                        (wa_id, batch_last_message_id or f"fallback_{batch_last_id}", reply_text, utc_now()),
+                    )
+                    conn.commit()
                 if finish_reply_worker_if_idle(wa_id, target_version):
                     return
                 continue
@@ -6453,7 +6476,7 @@ def recover_pending_reply_contacts_once(limit=12):
                 FROM wa_messages inbound
                 WHERE inbound.wa_id = c.wa_id
                   AND inbound.direction = 'inbound'
-                  AND inbound.message_type IN ('text', 'image')
+                  AND inbound.message_type IN ('text', 'image', 'audio')
                   AND inbound.id > COALESCE((
                       SELECT MAX(outbound.id)
                       FROM wa_messages outbound
