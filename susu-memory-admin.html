@@ -500,7 +500,9 @@
       <span id="batch-count">已選 0 項</span>
       <button id="batch-select-all" type="button">全選</button>
       <button id="batch-deselect-all" type="button">取消全選</button>
-      <button class="danger-btn" id="batch-delete-btn" type="button">刪除所選</button>
+      <button id="batch-renew-btn" type="button" hidden>🔄 續期所選</button>
+      <button id="batch-promote-btn" type="button" hidden>⬆ 提升所選為長期</button>
+      <button class="danger-btn" id="batch-delete-btn" type="button">🗑️ 刪除所選</button>
     </div>
 
     <div class="entries-grid" id="entries-grid">
@@ -899,6 +901,7 @@
     </div>
     <div class="entry-actions">
       <button class="entry-btn expand-btn" title="展開/摺疊">⬇</button>
+      <button class="entry-btn renew-btn" title="续期7天" data-id="${item.id}">🔄</button>
       <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="session" data-label="這條短期記憶">🗑️</button>
     </div>
   </div>
@@ -923,6 +926,7 @@
     </div>
     <div class="entry-actions">
       <button class="entry-btn expand-btn" title="展開/摺疊">⬇</button>
+      <button class="entry-btn promote-btn" title="提升为长期记忆" data-id="${item.id}">⬆</button>
       <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="archive" data-label="這條歸檔記憶">🗑️</button>
     </div>
   </div>
@@ -1017,8 +1021,35 @@
         const card = btn.closest('.entry-card');
         card.querySelector('.entry-body').classList.toggle('collapsed');
       }));
+    document.querySelectorAll('.renew-btn').forEach(btn =>
+      btn.addEventListener('click', async () => {
+        if (!confirm('確定要續期這條短期記憶 7 天嗎？')) return;
+        try {
+          await apiFetch('/memory/renew-session', {
+            method: 'POST',
+            body: JSON.stringify({ id: Number(btn.dataset.id) }),
+          });
+          await loadMemory();
+        } catch (e) { alert('續期失敗：' + e.message); }
+      }));
+    document.querySelectorAll('.promote-btn').forEach(btn =>
+      btn.addEventListener('click', async () => {
+        if (!confirm('確定要將這條歸檔記憶提升為長期記憶嗎？')) return;
+        try {
+          const res = await apiFetch('/memory/promote-archive', {
+            method: 'POST',
+            body: JSON.stringify({ id: Number(btn.dataset.id) }),
+          });
+          await loadMemory();
+          if (res?.new_id) {
+            document.getElementById('tab-long').click();
+          }
+        } catch (e) { alert('提升失敗：' + e.message); }
+      }));
     const batchTabs = ['long', 'session', 'archive'];
     document.getElementById('batch-toolbar').hidden = !batchTabs.includes(activeTab);
+    document.getElementById('batch-renew-btn').hidden = activeTab !== 'session';
+    document.getElementById('batch-promote-btn').hidden = activeTab !== 'archive';
     document.querySelectorAll('.batch-checkbox').forEach(cb => {
       cb.addEventListener('change', updateBatchCount);
     });
@@ -1055,6 +1086,45 @@
     }
     if (errors.length) alert('部分刪除失敗：' + errors.join('; '));
     await loadMemory();
+  });
+
+  document.getElementById('batch-renew-btn')?.addEventListener('click', async () => {
+    const checked = [...document.querySelectorAll('.batch-checkbox:checked')];
+    if (!checked.length) return;
+    if (!confirm(`確定要續期 ${checked.length} 條短期記憶 7 天嗎？`)) return;
+    const errors = [];
+    for (const cb of checked) {
+      try {
+        await apiFetch('/memory/renew-session', {
+          method: 'POST',
+          body: JSON.stringify({ id: Number(cb.dataset.id) }),
+        });
+      } catch (e) {
+        errors.push(`ID ${cb.dataset.id}: ${e.message}`);
+      }
+    }
+    if (errors.length) alert('部分續期失敗：' + errors.join('; '));
+    await loadMemory();
+  });
+
+  document.getElementById('batch-promote-btn')?.addEventListener('click', async () => {
+    const checked = [...document.querySelectorAll('.batch-checkbox:checked')];
+    if (!checked.length) return;
+    if (!confirm(`確定要將 ${checked.length} 條歸檔記憶提升為長期記憶嗎？`)) return;
+    const errors = [];
+    for (const cb of checked) {
+      try {
+        await apiFetch('/memory/promote-archive', {
+          method: 'POST',
+          body: JSON.stringify({ id: Number(cb.dataset.id) }),
+        });
+      } catch (e) {
+        errors.push(`ID ${cb.dataset.id}: ${e.message}`);
+      }
+    }
+    if (errors.length) alert('部分提升失敗：' + errors.join('; '));
+    await loadMemory();
+    if (!errors.length) document.getElementById('tab-long').click();
   });
 
   document.getElementById('expand-all-btn')?.addEventListener('click', () => {

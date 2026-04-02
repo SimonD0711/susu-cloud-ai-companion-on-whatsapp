@@ -593,6 +593,52 @@ def update_susu_reminder(entry_id, remind_at, content):
         conn.close()
 
 
+def renew_session_memory(entry_id, days=7):
+    entry_id = int(entry_id or 0)
+    if not entry_id:
+        return {"ok": False, "detail": "Missing id"}
+    conn = get_wa_agent_db()
+    try:
+        now = utc_now()
+        new_expires = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+        result = conn.execute(
+            "UPDATE wa_session_memories SET expires_at = ?, updated_at = ? WHERE id = ?",
+            (new_expires, now, entry_id),
+        )
+        conn.commit()
+        return {"ok": result.rowcount > 0, "expires_at": new_expires}
+    finally:
+        conn.close()
+
+
+def promote_archive_memory(entry_id):
+    entry_id = int(entry_id or 0)
+    if not entry_id:
+        return {"ok": False, "detail": "Missing id"}
+    conn = get_wa_agent_db()
+    try:
+        row = conn.execute(
+            "SELECT wa_id, content, observed_at FROM wa_memory_archive WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        if not row:
+            return {"ok": False, "detail": "Archive entry not found"}
+        now = utc_now()
+        memory_key = susu_normalize_key(row["content"] or "")
+        new_id = conn.execute(
+            """
+            INSERT INTO wa_memories (wa_id, content, memory_key, kind, importance, created_at, updated_at)
+            VALUES (?, ?, ?, 'manual', 1, ?, ?)
+            """,
+            (row["wa_id"], row["content"], memory_key, row["observed_at"] or now, now),
+        ).lastrowid
+        conn.execute("DELETE FROM wa_memory_archive WHERE id = ?", (entry_id,))
+        conn.commit()
+        return {"ok": True, "new_id": new_id}
+    finally:
+        conn.close()
+
+
 def delete_susu_memory(entry_id, item_type="memory"):
     entry_id = int(entry_id or 0)
     if not entry_id:
