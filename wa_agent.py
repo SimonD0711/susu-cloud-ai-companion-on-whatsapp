@@ -380,6 +380,7 @@ SYSTEM_PERSONA = textwrap.dedent(
     - 偏好用「嘻嘻」，唔好用「hehe」。
     - emoji 只係偶爾點綴就夠，通常成段 0 到 1 個；唔好每句都加 emoji。
     - 唔好提自己係 AI、模型、系統、prompt、政策。
+    - 要留意對方嘅即時位置（佢通常會話「我到X了」「我去X了」「我在X」），知道佢而家喺邊。
 
     【語音模式】
     語音模式係一個你可以用語音回覆嘅功能，唔需要任何特別操作。
@@ -756,6 +757,9 @@ def fetch_hko_weather_dataset(data_type, lang="tc"):
 
 HK_LOCATION_ALIASES = {
     "九龍塘": "九龍城", "九龙塘": "九龍城",
+    "cityu": "九龍城", "CityU": "九龍城", "city u": "九龍城",
+    "cuhk": "沙田", "CUHK": "沙田",
+    "宿舍": "九龍城", "屋企": "九龍城", "家": "九龍城",
     "旺角": "九龍城", "弼街": "九龍城",
     "太子": "深水埗",
     "油麻地": "油尖旺", "渡船角": "油尖旺",
@@ -865,6 +869,94 @@ CN_CITY_ALIASES = {
     "拉萨": "拉萨", "拉薩": "拉萨", "lhasa": "拉萨",
     "东莞": "东莞",
 }
+
+ALL_LOCATION_ALIASES = {**HK_LOCATION_ALIASES, **CN_CITY_ALIASES}
+
+def normalize_location(loc_text):
+    text = clean_text(loc_text).strip()
+    if not text:
+        return None
+    text_lower = text.lower()
+    normalized = ALL_LOCATION_ALIASES.get(text, None)
+    if normalized:
+        return normalized
+    for alias, canonical in ALL_LOCATION_ALIASES.items():
+        if alias.lower() == text_lower:
+            return canonical
+    if len(text) >= 2:
+        return text
+    return None
+
+_LOCATION_EXTRACT_PROMPT = textwrap.dedent(
+    """
+    你係一個位置偵測器。
+
+    用戶訊息：{text}
+
+    任務：判斷用戶喺呢句話入面有無透露自己當前或規劃中嘅位置。
+    只考慮用戶本人嘅位置，唔好判斷其他人嘅位置。
+    如果有用戶位置資訊，輸出以下格式：
+    {{"location": "具體地點"}}
+    地點要係正規化名稱，例如「長春」「深圳」「香港」「九龍城」「沙田」等。
+    如果冇位置資訊，輸出：
+    {{"location": null}}
+    只輸出 JSON，唔好加任何解釋。
+    """
+).strip()
+
+def extract_location_from_text(text):
+    raw = clean_text(text)
+    if not raw or len(raw) > 200:
+        return None
+    prompt = _LOCATION_EXTRACT_PROMPT.format(text=raw)
+    try:
+        result = generate_model_text(prompt, temperature=0.1, max_tokens=60)
+        data = parse_json_object(result)
+        loc = data.get("location") if isinstance(data, dict) else None
+        if loc:
+            return normalize_location(loc)
+    except Exception:
+        pass
+    return None
+
+def get_current_location(conn, wa_id):
+    if not conn or not wa_id:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT content FROM wa_memories WHERE wa_id=? AND memory_key='current_location' LIMIT 1",
+            (wa_id,),
+        ).fetchone()
+        return row["content"] if row else None
+    except Exception:
+        return None
+
+def maybe_update_user_location(conn, wa_id, text):
+    if not conn or not wa_id:
+        return
+    detected = extract_location_from_text(text)
+    if not detected:
+        return
+    current = get_current_location(conn, wa_id)
+    if current == detected:
+        return
+    now = utc_now()
+    try:
+        conn.execute(
+            """
+            INSERT INTO wa_memories (wa_id, kind, content, memory_key, importance, created_at, updated_at)
+            VALUES (?, 'location', ?, 'current_location', 5, ?, ?)
+            ON CONFLICT(wa_id, memory_key) DO UPDATE SET
+                kind = 'location',
+                content = excluded.content,
+                updated_at = excluded.updated_at
+            """,
+            (wa_id, detected, now, now),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
 
 
 def detect_weather_source(text):
@@ -5708,6 +5800,7 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
 
     persona_block = normalize_runtime_multiline(settings.get("system_persona"), SYSTEM_PERSONA)
     core_profile_block = build_core_profile_memory_text(primary_text) if primary_text else ""
+    current_location = get_current_location(conn, wa_id) if conn else None
     memory_block = {
         "primary_profile": core_profile_block,
         "long_term": selected["selected_long_term"],
@@ -5715,6 +5808,7 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
         "within_3d": short_groups.get("within_3d", []),
         "within_7d": short_groups.get("within_7d", []),
         "archive": archive_lines,
+        "current_location": current_location,
     }
     return {
         "profile_name": profile_name,
@@ -5784,6 +5878,7 @@ Current task state (high priority, understand this before replying):
 
 Core profile:
 {memory_block["primary_profile"] or "(none)"}
+{"User's known location: " + memory_block["current_location"] if memory_block["current_location"] else ""}
 
 Relevant long-term memories:
 {chr(10).join(memory_block["long_term"]) if memory_block["long_term"] else "(none)"}
@@ -5828,6 +5923,8 @@ def build_structured_context_from_runtime_context(runtime_context):
     ]
     if memory_block["primary_profile"]:
         system_parts.append("Core profile:\n" + memory_block["primary_profile"])
+    if memory_block.get("current_location"):
+        system_parts.append("User's known location: " + memory_block["current_location"])
     system_parts.append("Relevant long-term memories:\n" + ("\n".join(memory_block["long_term"]) if memory_block["long_term"] else "(none)"))
     system_parts.append("Relevant recent memories within 24h:\n" + ("\n".join(memory_block["within_24h"]) if memory_block["within_24h"] else "(none)"))
     system_parts.append("Relevant recent memories within 3d:\n" + ("\n".join(memory_block["within_3d"]) if memory_block["within_3d"] else "(none)"))
@@ -6083,6 +6180,8 @@ def maybe_extract_qa_turn_memory(conn, wa_id, combined_text):
 def record_batch_side_effects(conn, wa_id, profile_name, combined_text, memory_text, image_categories):
     if memory_text:
         maybe_extract_memories(conn, wa_id, profile_name, memory_text)
+    if combined_text:
+        maybe_update_user_location(conn, wa_id, combined_text)
     if combined_text:
         maybe_extract_session_memories(conn, wa_id, combined_text)
         maybe_extract_qa_turn_memory(conn, wa_id, combined_text)
