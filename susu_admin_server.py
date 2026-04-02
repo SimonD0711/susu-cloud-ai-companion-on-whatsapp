@@ -14,6 +14,8 @@ from susu_admin_core import (
     dedupe_primary_long_term_memories,
     delete_susu_memory,
     fetch_susu_memory,
+    promote_archive_memory,
+    renew_session_memory,
     update_susu_memory,
     update_susu_reminder,
     update_susu_settings,
@@ -252,6 +254,31 @@ class Handler(BaseHTTPRequestHandler):
             wa_id = str(data.get("wa_id", "")).strip()
             try:
                 result = dedupe_primary_long_term_memories(wa_id or SUSU_PRIMARY_WA_ID)
+            except Exception as exc:
+                result = {"ok": False, "detail": str(exc)}
+            self._send_json(result, 200 if result.get("ok") else 400)
+            return
+
+        if parsed.path == f"{API_PREFIX}/memory/renew-session":
+            entry_id = str(data.get("id", "")).strip()
+            days = int(data.get("days", 7))
+            if not entry_id:
+                self._send_json({"error": "Missing id"}, 400)
+                return
+            try:
+                result = renew_session_memory(entry_id, days)
+            except Exception as exc:
+                result = {"ok": False, "detail": str(exc)}
+            self._send_json(result, 200 if result.get("ok") else 400)
+            return
+
+        if parsed.path == f"{API_PREFIX}/memory/promote-archive":
+            entry_id = str(data.get("id", "")).strip()
+            if not entry_id:
+                self._send_json({"error": "Missing id"}, 400)
+                return
+            try:
+                result = promote_archive_memory(entry_id)
             except Exception as exc:
                 result = {"ok": False, "detail": str(exc)}
             self._send_json(result, 200 if result.get("ok") else 400)
