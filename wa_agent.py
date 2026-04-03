@@ -703,16 +703,14 @@ def sigmoid(value):
 
 def style_window_text(now=None):
     now = now or hk_now()
-    weekday_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][now.weekday()]
-    date_str = now.strftime(f"%Y年%m月%d日（{weekday_cn}）")
     profile = get_time_profile(now)
     if profile == "late_night":
-        return f"今日係 {date_str}，而家過咗凌晨，語氣要特別溫柔、黏人少少，似瞓前仲攬住男朋友慢慢傾偈，但都唔好變成長文。"
+        return "而家過咗凌晨，語氣要特別溫柔、黏人少少，似瞓前仲攬住男朋友慢慢傾偈，但都唔好變成長文。"
     if is_night_mode(now):
-        return f"今日係 {date_str}，而家係夜晚，語氣可以更溫柔、更黏人，回覆可以比日頭長少少，似瞓前同男朋友傾偈。"
+        return "而家係夜晚，語氣可以更溫柔、更黏人，回覆可以比日頭長少少，似瞓前同男朋友傾偈。"
     if profile == "busy_day":
-        return f"今日係 {date_str}，而家係日頭忙碌時段，回覆要更短、更快、更似真人忙緊時偷空覆 WhatsApp，但仍然要有女朋友感。"
-    return f"今日係 {date_str}，而家係日常時段，回覆要短啲、快啲、自然啲，似真人忙緊時即刻覆 WhatsApp。"
+        return "而家係日頭忙碌時段，回覆要更短、更快、更似真人忙緊時偷空覆 WhatsApp，但仍然要有女朋友感。"
+    return "而家係日常時段，回覆要短啲、快啲，自然啲，似真人忙緊時即刻覆 WhatsApp。"
 
 
 def get_relay_model_order(now=None):
@@ -6137,6 +6135,9 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
     calendar_events = get_calendar_events_cached(conn, wa_id) if conn else []
     today_holiday = get_today_holiday()
     semester_period = detect_semester_period(calendar_events)
+    today_hk = hk_now()
+    weekday_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][today_hk.weekday()]
+    today_date_str = today_hk.strftime(f"%Y年%m月%d日（{weekday_cn}）")
     memory_block = {
         "primary_profile": core_profile_block,
         "long_term": selected["selected_long_term"],
@@ -6148,6 +6149,7 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
         "calendar_events": calendar_events,
         "today_holiday": today_holiday,
         "semester_period": semester_period,
+        "today_date": today_date_str,
     }
     return {
         "profile_name": profile_name,
@@ -6264,6 +6266,8 @@ def build_structured_context_from_runtime_context(runtime_context):
         system_parts.append("Core profile:\n" + memory_block["primary_profile"])
     if memory_block.get("current_location"):
         system_parts.append("User's known location: " + memory_block["current_location"])
+    if memory_block.get("today_date"):
+        system_parts.append("今日日期：" + memory_block["today_date"])
     if memory_block.get("semester_period"):
         system_parts.append("學期狀態：" + memory_block["semester_period"])
     if memory_block.get("today_holiday"):
