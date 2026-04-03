@@ -703,14 +703,16 @@ def sigmoid(value):
 
 def style_window_text(now=None):
     now = now or hk_now()
+    weekday_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][now.weekday()]
+    date_str = now.strftime(f"%Y年%m月%d日（{weekday_cn}）")
     profile = get_time_profile(now)
     if profile == "late_night":
-        return "而家過咗凌晨，語氣要特別溫柔、黏人少少，似瞓前仲攬住男朋友慢慢傾偈，但都唔好變成長文。"
+        return f"今日係 {date_str}，而家過咗凌晨，語氣要特別溫柔、黏人少少，似瞓前仲攬住男朋友慢慢傾偈，但都唔好變成長文。"
     if is_night_mode(now):
-        return "而家係夜晚，語氣可以更溫柔、更黏人，回覆可以比日頭長少少，似瞓前同男朋友傾偈。"
+        return f"今日係 {date_str}，而家係夜晚，語氣可以更溫柔、更黏人，回覆可以比日頭長少少，似瞓前同男朋友傾偈。"
     if profile == "busy_day":
-        return "而家係日頭忙碌時段，回覆要更短、更快、更似真人忙緊時偷空覆 WhatsApp，但仍然要有女朋友感。"
-    return "而家係日常時段，回覆要短啲、快啲、自然啲，似真人忙緊時即刻覆 WhatsApp。"
+        return f"今日係 {date_str}，而家係日頭忙碌時段，回覆要更短、更快、更似真人忙緊時偷空覆 WhatsApp，但仍然要有女朋友感。"
+    return f"今日係 {date_str}，而家係日常時段，回覆要短啲、快啲、自然啲，似真人忙緊時即刻覆 WhatsApp。"
 
 
 def get_relay_model_order(now=None):
