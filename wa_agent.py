@@ -103,6 +103,8 @@ _reply_worker_states = {}
 _reply_worker_states_lock = threading.Lock()
 _read_scheduler_states = {}
 _read_scheduler_states_lock = threading.Lock()
+_session_extraction_locks = {}  # {wa_id: threading.Lock()}
+_session_extraction_locks_lock = threading.Lock()
 _last_memory_extraction = 0.0
 _MEMORY_EXTRACTION_COOLDOWN = 300.0  # 5 minutes
 
@@ -5188,16 +5190,22 @@ def heuristic_extract_session_memories(incoming_text):
 
 
 def maybe_extract_session_memories(conn, wa_id, incoming_text):
-    existing_rows = conn.execute(
-        "SELECT content, bucket FROM wa_session_memories WHERE wa_id = ? LIMIT 30",
-        (wa_id,),
-    ).fetchall()
-    existing_texts = "\n".join(
-        f'- "{clean_text(r["content"])}"'
-        for r in existing_rows
-    ) if existing_rows else "（暫時未有短期記憶）"
+    with _session_extraction_locks_lock:
+        lock = _session_extraction_locks.setdefault(wa_id, threading.Lock())
+    acquired = lock.acquire(blocking=False)
+    if not acquired:
+        return []
+    try:
+        existing_rows = conn.execute(
+            "SELECT content, bucket FROM wa_session_memories WHERE wa_id = ? LIMIT 30",
+            (wa_id,),
+        ).fetchall()
+        existing_texts = "\n".join(
+            f'- "{clean_text(r["content"])}"'
+            for r in existing_rows
+        ) if existing_rows else "（暫時未有短期記憶）"
 
-    prompt = f"""
+        prompt = f"""
 對方剛剛講：
 {clean_text(incoming_text)}
 
@@ -5226,30 +5234,32 @@ def maybe_extract_session_memories(conn, wa_id, incoming_text):
 最多 4 項。如果冇值得記嘅就輸出 []。
 """.strip()
 
-    extracted = []
-    try:
-        raw = generate_model_text(prompt, temperature=0.15, max_tokens=280, system_prompt=RECENT_MEMORY_EXTRACTOR_PROMPT)
-        for item in parse_json_array(raw):
-            if not isinstance(item, dict):
-                continue
-            content = clean_text(item.get("content"))
-            bucket = normalize_recent_bucket(item.get("bucket"))
-            if is_recent_memory_candidate(content):
-                observed_at = infer_observed_at_from_text(content)
-                extracted.append({"bucket": bucket, "content": content, "observed_at": observed_at})
-    except Exception:
         extracted = []
+        try:
+            raw = generate_model_text(prompt, temperature=0.15, max_tokens=280, system_prompt=RECENT_MEMORY_EXTRACTOR_PROMPT)
+            for item in parse_json_array(raw):
+                if not isinstance(item, dict):
+                    continue
+                content = clean_text(item.get("content"))
+                bucket = normalize_recent_bucket(item.get("bucket"))
+                if is_recent_memory_candidate(content):
+                    observed_at = infer_observed_at_from_text(content)
+                    extracted.append({"bucket": bucket, "content": content, "observed_at": observed_at})
+        except Exception:
+            extracted = []
 
-    if not extracted:
-        extracted = heuristic_extract_session_memories(incoming_text)
+        if not extracted:
+            extracted = heuristic_extract_session_memories(incoming_text)
 
-    saved = []
-    for item in extracted:
-        if upsert_session_memory(conn, wa_id, item["content"], bucket=item["bucket"], observed_at=item.get("observed_at")):
-            saved.append(item["content"])
-    if saved:
-        conn.commit()
-    return saved
+        saved = []
+        for item in extracted:
+            if upsert_session_memory(conn, wa_id, item["content"], bucket=item["bucket"], observed_at=item.get("observed_at")):
+                saved.append(item["content"])
+        if saved:
+            conn.commit()
+        return saved
+    finally:
+        lock.release()
 
 
 def load_session_memory_rows(conn, wa_id, limit=8, bucket=None):
