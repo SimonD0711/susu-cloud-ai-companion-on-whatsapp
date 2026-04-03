@@ -990,7 +990,7 @@ def maybe_update_user_location(conn, wa_id, text):
             """,
             (wa_id, detected, now, now),
         )
-        if detected in CN_CITY_ALIASES and detected != "深圳":
+        if detected not in HK_LOCATION_ALIASES and detected not in ("深圳", "香港", "澳門"):
             holiday_content = f"用戶在放假期，目前在外地：{detected}。"
             try:
                 upsert_memory(conn, wa_id, holiday_content, kind="holiday", importance=4)
