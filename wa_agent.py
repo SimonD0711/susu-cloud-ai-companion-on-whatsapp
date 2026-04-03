@@ -990,6 +990,12 @@ def maybe_update_user_location(conn, wa_id, text):
             """,
             (wa_id, detected, now, now),
         )
+        if detected in CN_CITY_ALIASES:
+            holiday_content = f"用戶在放假期，目前在外地：{detected}。"
+            try:
+                upsert_memory(conn, wa_id, holiday_content, kind="holiday", importance=4)
+            except Exception:
+                pass
         conn.commit()
     except Exception:
         pass
