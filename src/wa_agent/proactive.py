@@ -40,7 +40,7 @@ def _clean_text(text: str) -> str:
 
 def _normalize_key(text: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]", "", text.lower())
-    return cleaned[:100]
+    return cleaned[:160]
 
 
 def _normalize_bucket(bucket: str) -> str:
@@ -349,6 +349,7 @@ def format_session_memory_lines(conn, wa_id: str, bucket: str, limit: int = 6) -
         if key in seen:
             continue
         seen.add(key)
+        _bump_use_count(conn, wa_id, row.get("memory_key", ""))
         bucket_value = row.get("current_bucket") or current_recent_bucket(row.get("observed_at") or row.get("updated_at")) or normalize_recent_bucket(row.get("bucket", bucket))
         stamp = format_memory_timestamp(row.get("observed_at") or row.get("updated_at", ""))
         tag = recent_bucket_label(bucket_value)
@@ -357,6 +358,19 @@ def format_session_memory_lines(conn, wa_id: str, bucket: str, limit: int = 6) -
         else:
             formatted.append(f"- [{tag}] {content}")
     return formatted
+
+
+def _bump_use_count(conn, wa_id: str, memory_key: str):
+    if not memory_key:
+        return
+    row = conn.execute(
+        "SELECT id, use_count FROM wa_session_memories WHERE wa_id=? AND memory_key=? LIMIT 1",
+        (wa_id, memory_key),
+    ).fetchone()
+    if not row:
+        return
+    new_count = (row["use_count"] or 0) + 1
+    conn.execute("UPDATE wa_session_memories SET use_count=? WHERE id=?", (new_count, row["id"]))
 
 
 def load_recent_messages(conn, wa_id: str, limit: int = 8) -> list[dict]:
@@ -540,9 +554,10 @@ def build_proactive_prompt(conn, wa_id: str, profile_name: str, now: Optional[da
 主動開場提示：
 {proactive_slot_hint(now)}
 
-你而家想主動搵對方開話題。請直接輸出一段自然、似真人 WhatsApp 嘅主動訊息：
+ 你而家想主動搵對方開話題。請直接輸出一段自然、似真人 WhatsApp 嘅主動訊息：
 - 要似女朋友突然掛住佢、順手搵佢，唔好似客服 check in
-- 優先接住最近聊天、短期狀態或者你記得嘅生活細節
+- 優先用「24 小時內記憶」嘅內容開話題，其次用「三天內記憶」，除非冇先考慮「一週內記憶」
+- 唔好重複用同一條記憶，每次主動最好揀唔同嘅 hook
 - 如果冇明顯 hook，就簡單關心或者輕輕撒嬌
 - 如果係下晝，偏向輕輕問一句就夠，唔好太黏
 - 如果係夜晚或者夜深，偏向關心加少少撒嬌，似真係掛住佢

@@ -201,6 +201,14 @@ class Handler(BaseHTTPRequestHandler):
             content = str(data.get("content", data.get("value", "")))
             kind = str(data.get("kind", "")).strip()
             remind_at = str(data.get("remind_at", "")).strip()
+            importance_raw = data.get("importance")
+            if importance_raw is not None:
+                try:
+                    importance = int(importance_raw)
+                except (ValueError, TypeError):
+                    importance = None
+            else:
+                importance = None
             if not entry_id:
                 self._send_json({"error": "Missing id"}, 400)
                 return
@@ -208,7 +216,7 @@ class Handler(BaseHTTPRequestHandler):
                 if item_type == "reminder":
                     result = update_susu_reminder(entry_id, remind_at, content)
                 else:
-                    result = update_susu_memory(entry_id, content, kind)
+                    result = update_susu_memory(entry_id, content, kind, importance)
             except Exception as exc:
                 result = {"ok": False, "detail": str(exc)}
             self._send_json(result, 200 if result.get("ok") else 400)

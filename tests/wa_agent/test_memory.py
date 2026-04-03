@@ -8,6 +8,7 @@ from src.wa_agent.memory import (
     normalize_key,
     normalize_recent_bucket,
     classify_recent_memory_bucket,
+    infer_observed_at_from_text,
     MemoryManager,
     MEMORY_EXTRACTOR_PROMPT,
     RECENT_MEMORY_EXTRACTOR_PROMPT,
@@ -46,8 +47,54 @@ def test_is_recent_memory_candidate_too_short():
 
 def test_normalize_key():
     key = normalize_key("Simon 最鍾意周杰倫！?")
-    assert len(key) <= 100
+    assert len(key) <= 160
     assert key.islower() or not any(c.isalpha() for c in key)
+
+
+def test_normalize_key_strips_chinese_punctuation():
+    key1 = normalize_key("今日約咗朋友。")
+    key2 = normalize_key("今日約咗朋友")
+    assert key1 == key2
+
+
+def test_infer_observed_at_past_markers():
+    from datetime import datetime, timezone
+    now = datetime(2026, 4, 3, 12, 0, 0, tzinfo=timezone.utc)
+    result = infer_observed_at_from_text("尋晚睇咗個片", now)
+    assert result is not None
+    assert result.day == 2
+
+
+def test_infer_observed_at_future_markers():
+    from datetime import datetime, timezone
+    now = datetime(2026, 4, 3, 12, 0, 0, tzinfo=timezone.utc)
+    result = infer_observed_at_from_text("聽日考試", now)
+    assert result is not None
+    assert result.day == 4
+
+
+def test_infer_observed_at_no_marker():
+    from datetime import datetime, timezone
+    now = datetime(2026, 4, 3, 12, 0, 0, tzinfo=timezone.utc)
+    result = infer_observed_at_from_text("我鍾意周杰倫", now)
+    assert result is None
+
+
+def test_infer_observed_at_within_24h():
+    from datetime import datetime, timezone
+    now = datetime(2026, 4, 3, 12, 0, 0, tzinfo=timezone.utc)
+    result = infer_observed_at_from_text("啱啱上完堂", now)
+    assert result is not None
+    assert result.day == 3
+
+
+def test_classify_recent_memory_bucket_all_markers():
+    assert classify_recent_memory_bucket("今晚去睇戲") == "within_24h"
+    assert classify_recent_memory_bucket("尋晚睇咗個片") == "within_3d"
+    assert classify_recent_memory_bucket("最近忙緊") == "within_7d"
+    assert classify_recent_memory_bucket("昨日考試") == "within_3d"
+    assert classify_recent_memory_bucket("聽日上堂") == "within_3d"
+    assert classify_recent_memory_bucket("呢兩三日感冒") == "within_3d"
 
 
 def test_normalize_recent_bucket_within_24h():
@@ -93,11 +140,11 @@ def test_recent_memory_extractor_prompt_not_empty():
 
 def test_memory_manager_has_extract_methods():
     from src.wa_agent.memory import MemoryManager
-    manager = MemoryManager(None)
-    assert hasattr(manager, "extract_and_save_long_term")
-    assert hasattr(manager, "extract_and_save_session")
-    assert hasattr(manager, "is_long_term_candidate")
-    assert hasattr(manager, "is_recent_candidate")
-    assert hasattr(manager, "normalize_key")
-    assert hasattr(manager, "normalize_bucket")
-    assert hasattr(manager, "classify_bucket")
+    assert hasattr(MemoryManager, "extract_and_save_long_term")
+    assert hasattr(MemoryManager, "extract_and_save_session")
+    assert hasattr(MemoryManager, "is_long_term_candidate")
+    assert hasattr(MemoryManager, "is_recent_candidate")
+    assert hasattr(MemoryManager, "normalize_key")
+    assert hasattr(MemoryManager, "normalize_bucket")
+    assert hasattr(MemoryManager, "classify_bucket")
+    assert hasattr(MemoryManager, "infer_observed_at")

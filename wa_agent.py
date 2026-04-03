@@ -105,6 +105,8 @@ _read_scheduler_states = {}
 _read_scheduler_states_lock = threading.Lock()
 _last_memory_extraction = 0.0
 _MEMORY_EXTRACTION_COOLDOWN = 300.0  # 5 minutes
+_session_extraction_states = {}  # {wa_id: last_extraction_timestamp}
+_SESSION_EXTRACTION_COOLDOWN = 120.0  # 2 minutes between session extractions per contact
 
 WEATHER_QUERY_KEYWORDS = (
     "天氣", "天气", "weather", "氣溫", "气温", "幾度", "几度", "落雨", "落唔落雨",
@@ -3040,7 +3042,7 @@ def build_live_search_reply(incoming_text, conn=None, wa_id=""):
 
 def normalize_key(value):
     value = clean_text(value).lower()
-    value = re.sub(r"[\s\-_.,!?~]+", "", value)
+    value = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]", "", value)
     return value[:160]
 
 
@@ -3251,6 +3253,8 @@ def get_db():
     ensure_runtime_settings_table(conn)
     ensure_column(conn, "wa_session_memories", "bucket", "bucket TEXT NOT NULL DEFAULT 'within_7d'")
     ensure_column(conn, "wa_session_memories", "observed_at", "observed_at TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "wa_session_memories", "memory_type", "memory_type TEXT NOT NULL DEFAULT 'event'")
+    ensure_column(conn, "wa_session_memories", "use_count", "use_count INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "wa_memories", "memory_key", "memory_key TEXT NOT NULL DEFAULT ''")
     ensure_column(conn, "wa_memories", "created_at", "created_at TEXT NOT NULL DEFAULT ''")
     ensure_column(conn, "wa_memories", "importance", "importance INTEGER NOT NULL DEFAULT 3")
@@ -4021,7 +4025,14 @@ def split_memory_clauses(incoming_text):
         piece = clean_text(piece)
         if not piece:
             continue
-        chunks = re.split(r"[，,、]", piece) if len(piece) > 36 else [piece]
+        has_temporal = any(
+            marker in piece
+            for marker in RECENT_24H_MARKERS + RECENT_3D_MARKERS + RECENT_7D_MARKERS
+        )
+        if has_temporal and len(piece) <= 60:
+            chunks = [piece]
+        else:
+            chunks = re.split(r"[，,、]", piece) if len(piece) > 36 else [piece]
         for chunk in chunks:
             chunk = clean_text(chunk).rstrip("，。!?！？")
             key = normalize_key(chunk)
@@ -4053,6 +4064,47 @@ def classify_recent_memory_bucket(text, observed_at=None, now=None):
         if age <= timedelta(hours=72):
             return "within_3d"
     return "within_7d"
+
+
+def infer_observed_at_from_text(text, now=None):
+    value = clean_text(text)
+    if not value:
+        return None
+    now_utc = (now or hk_now()).astimezone(timezone.utc)
+    shift_days = 0
+
+    PAST_MARKERS = {
+        # within_24h
+        "頭先": 0, "啱啱": 0, "剛剛": 0, "刚刚": 0, "而家": 0, "宜家": 0, "我而家": 0, "依家": 0,
+        # within_3d
+        "尋晚": 1, "昨晚": 1, "琴晚": 1, "噚晚": 1, "昨日": 1, "琴日": 1, "噚日": 1, "前日": 1,
+        # within_7d / further
+        "上個禮拜": 7, "上個星期": 7, "上禮拜": 7,
+        "上兩日": 2, "上兩三日": 3,
+    }
+
+    FUTURE_MARKERS = {
+        "聽日": 1, "听日": 1, "明天": 1, "明日": 1,
+        "聽朝": 1, "听朝": 1, "明早": 1,
+        "後日": 2, "后天": 2,
+        "大後日": 3, "大后天": 3,
+        "下個禮拜": -7, "下個星期": -7,
+    }
+
+    for marker, days in PAST_MARKERS.items():
+        if marker in value:
+            shift_days = days
+            break
+    else:
+        for marker, days in FUTURE_MARKERS.items():
+            if marker in value:
+                shift_days = -days
+                break
+
+    if shift_days == 0:
+        return None
+
+    return (now_utc - timedelta(days=shift_days)).astimezone(timezone.utc)
 
 
 def is_recent_memory_candidate(text):
@@ -4544,7 +4596,7 @@ def load_memories(conn, wa_id):
     return [dict(row) for row in rows]
 
 
-def upsert_session_memory(conn, wa_id, content, bucket="within_7d", ttl_hours=None, observed_at=None, updated_at_text=None):
+def upsert_session_memory(conn, wa_id, content, bucket="within_7d", ttl_hours=None, observed_at=None, updated_at_text=None, memory_type="event"):
     text = clean_text(content)
     if not text:
         return False
@@ -4562,18 +4614,46 @@ def upsert_session_memory(conn, wa_id, content, bucket="within_7d", ttl_hours=No
     now_text = clean_text(updated_at_text) or now.isoformat()
     conn.execute(
         """
-        INSERT INTO wa_session_memories (wa_id, content, memory_key, bucket, observed_at, updated_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO wa_session_memories (wa_id, content, memory_key, bucket, observed_at, updated_at, expires_at, memory_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(wa_id, memory_key) DO UPDATE SET
             content = excluded.content,
             bucket = excluded.bucket,
             observed_at = excluded.observed_at,
             updated_at = excluded.updated_at,
-            expires_at = excluded.expires_at
+            expires_at = excluded.expires_at,
+            use_count = use_count
         """,
-        (wa_id, text, scoped_key, bucket, observed_at_text, now_text, expires_at_text),
+        (wa_id, text, scoped_key, bucket, observed_at_text, now_text, expires_at_text, memory_type),
     )
     return True
+
+
+def bump_session_memory_use_count(conn, wa_id, memory_key):
+    if not memory_key:
+        return
+    row = conn.execute(
+        "SELECT id, use_count FROM wa_session_memories WHERE wa_id=? AND memory_key=? LIMIT 1",
+        (wa_id, memory_key),
+    ).fetchone()
+    if not row:
+        return
+    new_count = (row["use_count"] or 0) + 1
+    if new_count >= 5:
+        observed = parse_iso_dt(
+            conn.execute("SELECT observed_at FROM wa_session_memories WHERE id=?", (row["id"],)).fetchone()["observed_at"]
+        ) if row["id"] else None
+        if observed:
+            extended_ttl_hours = SHORT_TERM_MEMORY_RETENTION_HOURS * 2
+            new_expires = (observed + timedelta(hours=extended_ttl_hours)).isoformat()
+            conn.execute(
+                "UPDATE wa_session_memories SET use_count=?, expires_at=? WHERE id=?",
+                (new_count, new_expires, row["id"]),
+            )
+        else:
+            conn.execute("UPDATE wa_session_memories SET use_count=? WHERE id=?", (new_count, row["id"]))
+    else:
+        conn.execute("UPDATE wa_session_memories SET use_count=? WHERE id=?", (new_count, row["id"]))
 
 
 def build_combined_user_input(rows, conn=None, wa_id=""):
@@ -5083,10 +5163,12 @@ def heuristic_extract_session_memories(incoming_text):
     for clause in split_memory_clauses(incoming_text):
         if not is_recent_memory_candidate(clause):
             continue
+        observed_at = infer_observed_at_from_text(clause)
         extracted.append(
             {
                 "bucket": classify_recent_memory_bucket(clause),
                 "content": clause,
+                "observed_at": observed_at,
             }
         )
 
@@ -5100,53 +5182,68 @@ def heuristic_extract_session_memories(incoming_text):
                 {
                     "bucket": normalize_recent_bucket(item["bucket"]),
                     "content": clean_text(item["content"]).rstrip("，。!?！？"),
+                    "observed_at": item.get("observed_at"),
                 }
             )
     return deduped[:4]
 
 
-def extract_live_search_question_memory(incoming_text):
-    plan = build_live_search_plan(incoming_text)
-    if not plan or not plan.get("should_search"):
-        return None
-    value = clean_text(incoming_text).rstrip("，。!?！？")
-    if len(value) < 4:
-        return None
-    return {
-        "bucket": "within_24h",
-        "content": f"對方啱啱問過：{value}",
-    }
-
-
 def maybe_extract_session_memories(conn, wa_id, incoming_text):
+    global _session_extraction_states
+    now_ts = time.time()
+    last_ts = _session_extraction_states.get(wa_id, 0.0)
+    if now_ts - last_ts < _SESSION_EXTRACTION_COOLDOWN:
+        return []
+    _session_extraction_states[wa_id] = now_ts
+    existing_rows = conn.execute(
+        "SELECT content, bucket FROM wa_session_memories WHERE wa_id = ? LIMIT 30",
+        (wa_id,),
+    ).fetchall()
+    existing_texts = "\n".join(
+        f'- "{clean_text(r["content"])}"'
+        for r in existing_rows
+    ) if existing_rows else "（暫時未有短期記憶）"
+
     prompt = f"""
 對方剛剛講：
 {clean_text(incoming_text)}
 
-請抽取值得保留嘅短期記憶，分類只可以用以下三種：
-- within_24h：24 小時內，例如而家、今日、今晚、頭先、啱啱、今日課堂安排
-- within_3d：三天內，例如尋晚、昨日、明天、後天、呢兩三日
-- within_7d：一星期內，例如最近幾日、今個星期、近期要完成嘅短任務
+已有短期記憶（請唔好重複）：
+{existing_texts}
 
-不要抽取：
-- 長期背景、長期偏好、長期習慣
+請抽取值得保留嘅短期記憶。輸出 JSON array，每項格式：
+{{"content": "記憶內容", "bucket": "within_24h|within_3d|within_7d"}}
+
+時間詞 → bucket 對照：
+- within_24h：頭先、啱啱、今日（事件發生在今日）、今晚、今朝
+- within_3d：尋晚、昨日、聽日、明天、後天、呢兩三日
+- within_7d：最近、近排、今個星期、最近幾日、最近嘅短期計劃或任務
+
+⚠️ 重要：時間詞指嘅係「事件發生嘅時間」，唔係「對方講呢句說話嘅時間」！
+- 「昨天吃了包子」→ 事件發生喺昨天 → bucket = within_3d
+- 「今日約咗朋友」→ 事件發生喺今日 → bucket = within_24h
+- 「聽日考試」→ 事件發生喺明天 → bucket = within_3d
+
+唔好抽取：
+- 長期背景、長期偏好、長期習慣（呢啲係長期記憶嘅範疇）
 - 冇資訊量嘅撒嬌、純情緒、客套句
-- 太私密或太敏感細節
-- 但如果對方啱啱問即時資訊，例如新聞、天氣、最新作品、股價、比賽結果，呢條「問過咩」本身都算短期記憶
+- 太私密或太敏感嘅細節
+- 已經喺上面已有短期記憶入面嘅內容
 
-最多 4 項。
+最多 4 項。如果冇值得記嘅就輸出 []。
 """.strip()
 
     extracted = []
     try:
-        raw = generate_model_text(prompt, temperature=0.15, max_tokens=220, system_prompt=RECENT_MEMORY_EXTRACTOR_PROMPT)
+        raw = generate_model_text(prompt, temperature=0.15, max_tokens=280, system_prompt=RECENT_MEMORY_EXTRACTOR_PROMPT)
         for item in parse_json_array(raw):
             if not isinstance(item, dict):
                 continue
             content = clean_text(item.get("content"))
             bucket = normalize_recent_bucket(item.get("bucket"))
             if is_recent_memory_candidate(content):
-                extracted.append({"bucket": bucket, "content": content})
+                observed_at = infer_observed_at_from_text(content)
+                extracted.append({"bucket": bucket, "content": content, "observed_at": observed_at})
     except Exception:
         extracted = []
 
@@ -5155,7 +5252,7 @@ def maybe_extract_session_memories(conn, wa_id, incoming_text):
 
     saved = []
     for item in extracted:
-        if upsert_session_memory(conn, wa_id, item["content"], bucket=item["bucket"]):
+        if upsert_session_memory(conn, wa_id, item["content"], bucket=item["bucket"], observed_at=item.get("observed_at")):
             saved.append(item["content"])
     if saved:
         conn.commit()
@@ -5299,9 +5396,10 @@ def build_proactive_prompt(conn, wa_id, profile_name, now=None):
 主動開場提示：
 {proactive_slot_hint(now)}
 
-你而家想主動搵對方開話題。請直接輸出一段自然、似真人 WhatsApp 嘅主動訊息：
+ 你而家想主動搵對方開話題。請直接輸出一段自然、似真人 WhatsApp 嘅主動訊息：
 - 要似女朋友突然掛住佢、順手搵佢，唔好似客服 check in
-- 優先接住最近聊天、短期狀態或者你記得嘅生活細節
+- 優先用「24 小時內記憶」嘅內容開話題，其次用「三天內記憶」，除非冇先考慮「一週內記憶」
+- 唔好重複用同一條記憶，每次主動最好揀唔同嘅 hook
 - 如果冇明顯 hook，就簡單關心或者輕輕撒嬌
 - 如果係下晝，偏向輕輕問一句就夠，唔好太黏
 - 如果係夜晚或者夜深，偏向關心加少少撒嬌，似真係掛住佢
@@ -6030,6 +6128,7 @@ def select_relevant_memories(conn, wa_id, incoming_text, task_state, history_row
         if any(memories_look_duplicated(row["content"], existing["content"]) for existing in selected_short):
             continue
         selected_short.append(row)
+        bump_session_memory_use_count(conn, wa_id, row.get("memory_key", ""))
         if len(selected_short) >= short_limit:
             break
 
@@ -6299,6 +6398,7 @@ def build_structured_context_from_runtime_context(runtime_context):
         "- If the current inbound looks like a course code, identifier, or quoted short answer, do not switch to unrelated recent chat topics.\n"
         "- If the current inbound is a code or identifier, first say what it most likely refers to. If you cannot infer it confidently, ask one direct clarifying question. Do not pivot to unrelated recent chat.\n"
         "- If the user asks about quiz, assignment, exam, or upcoming academic schedule, check the memory sections above first and answer directly based on what you know. Do not ask the user to remind you of info you may already have in memory; only ask if the relevant memory is genuinely absent.\n"
+        "- If there are relevant short-term memories (24h / 3d sections), actively reference them in your reply where natural — e.g., follow up on something they mentioned earlier today or yesterday. Prefer 24h memories over 3d, and 3d over 7d.\n"
         "- Keep replies natural and concise for WhatsApp.\n"
         "- Use at most 0-1 inline emoji in a whole reply.\n"
         "- Output only the WhatsApp reply body itself."

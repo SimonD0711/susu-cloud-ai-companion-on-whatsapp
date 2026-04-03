@@ -29,7 +29,7 @@ def hk_now():
 def _normalize_key(text: str) -> str:
     import re
     cleaned = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]", "", text.lower())
-    return cleaned[:100]
+    return cleaned[:160]
 
 
 def _normalize_bucket(bucket: str) -> str:

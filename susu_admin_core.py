@@ -375,7 +375,7 @@ def fetch_susu_memory(selected_wa_id=""):
             session_memories = []
             for row in conn.execute(
                 """
-                SELECT id, wa_id, bucket, content, memory_key, observed_at, updated_at, expires_at
+                SELECT id, wa_id, bucket, content, memory_key, observed_at, updated_at, expires_at, use_count
                 FROM wa_session_memories
                 WHERE wa_id = ?
                 ORDER BY updated_at DESC, id DESC
@@ -398,6 +398,7 @@ def fetch_susu_memory(selected_wa_id=""):
                         "updated_at": row["updated_at"] or "",
                         "expires_at": row["expires_at"] or "",
                         "is_expired": bool(expires_at and expires_at <= now_utc),
+                        "use_count": row["use_count"] if row["use_count"] is not None else 0,
                     }
                 )
             if archive_enabled:
@@ -444,6 +445,22 @@ def fetch_susu_memory(selected_wa_id=""):
             ]
 
         selected_contact = next((item for item in contacts if item["wa_id"] == selected_wa_id), None)
+
+        def _count_session_new_this_week(session_list, now=None):
+            if now is None:
+                now = datetime.now(timezone.utc)
+            week_ago = now - timedelta(days=7)
+            return sum(
+                1 for item in session_list
+                if item.get("updated_at")
+                and parse_iso_text(item["updated_at"])
+                and parse_iso_text(item["updated_at"]) >= week_ago
+            )
+
+        def _avg_session_use_count(session_list):
+            counts = [item.get("use_count") or 0 for item in session_list if item.get("use_count") is not None]
+            return sum(counts) / len(counts) if counts else 0.0
+
         return {
             "checked_at": utc_now(),
             "selected_wa_id": selected_wa_id,
@@ -464,6 +481,9 @@ def fetch_susu_memory(selected_wa_id=""):
                 "archive_count": len(archived_memories),
                 "reminder_count": len(reminders),
                 "pending_reminder_count": sum(1 for item in reminders if not item["fired"]),
+                "session_new_this_week": _count_session_new_this_week(session_memories, now_utc),
+                "session_avg_use_count": _avg_session_use_count(session_memories),
+                "session_unused_count": sum(1 for item in session_memories if (item.get("use_count") or 0) == 0),
             },
         }
     finally:

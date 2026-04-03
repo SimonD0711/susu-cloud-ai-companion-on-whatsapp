@@ -596,6 +596,21 @@
           <div class="summary-value" id="stat-reminder">0</div>
           <div class="summary-sub" id="stat-reminder-sub">0 條未觸發</div>
         </div>
+        <div class="summary-card" style="background: rgba(92,214,221,0.08);">
+          <div class="summary-label">本周新增短期記憶</div>
+          <div class="summary-value" id="stat-session-new" style="color:var(--accent);">—</div>
+          <div class="summary-sub" id="stat-session-new-sub">過去 7 天</div>
+        </div>
+        <div class="summary-card" style="background: rgba(92,214,221,0.08);">
+          <div class="summary-label">平均引用次數</div>
+          <div class="summary-value" id="stat-session-avg-use" style="color:var(--accent);">—</div>
+          <div class="summary-sub" id="stat-session-avg-use-sub">被蘇蘇主動引用</div>
+        </div>
+        <div class="summary-card" style="background: rgba(255,211,123,0.08);">
+          <div class="summary-label">未使用記憶</div>
+          <div class="summary-value" id="stat-session-unused" style="color:var(--warn);">—</div>
+          <div class="summary-sub" id="stat-session-unused-sub">從未被引用</div>
+        </div>
       </div>
     </section>
 
@@ -956,6 +971,11 @@
     document.getElementById('stat-archive-sub').textContent = `${stats.archive_count || 0} 條已歸檔 · 7 天後永久保留`;
     document.getElementById('stat-reminder').textContent = String(stats.reminder_count || 0);
     document.getElementById('stat-reminder-sub').textContent = `${stats.pending_reminder_count || 0} 條未觸發`;
+    document.getElementById('stat-session-new').textContent = String(stats.session_new_this_week || 0);
+    document.getElementById('stat-session-avg-use').textContent = String(
+      stats.session_avg_use_count !== undefined ? stats.session_avg_use_count.toFixed(1) : '—'
+    );
+    document.getElementById('stat-session-unused').textContent = String(stats.session_unused_count || 0);
   }
 
   function badgeHtml(label, extraClass = '') {
