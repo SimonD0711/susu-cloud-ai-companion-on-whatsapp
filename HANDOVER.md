@@ -1,6 +1,6 @@
 # 苏苏（Susu）WhatsApp 聊天机器人 — 运维手册
 
-> **最后更新：2026-04-03** | 架构版本：v3（含日历系统 + UI全面优化）
+> **最后更新：2026-04-03** | 架构版本：v4（含短期记忆全面重构 + 反馈机制 + 时间桶修复）
 
 ---
 
@@ -43,7 +43,12 @@ C:\Users\ding7\Documents\susu-cloud\   # 本地开发目录（monolith + modular
 | `spawn_reply_generation_subprocess` | ~6500 | 启动 reply subprocess |
 | `ensure_reply_worker_running` | ~6446 | 触发 reply worker 线程 |
 | `recover_pending_reply_contacts_once` | ~6475 | 恢复扫描（包含 audio 联系人） |
-| `maybe_extract_memories` | ~4587 | LLM 抽取长期记忆 |
+| `maybe_extract_memories` | ~5042 | LLM 抽取长期记忆（含冷却机制） |
+| `maybe_extract_session_memories` | ~5161 | LLM 抽取短期记忆（含 rate limiting + 已有记忆去重） |
+| `heuristic_extract_session_memories` | ~5129 | 启发式短期记忆回退（已修复碎片化 + infer_observed_at） |
+| `infer_observed_at_from_text` | ~4058 | 从时间词推断事件实际发生时间 |
+| `bump_session_memory_use_count` | ~4630 | 追踪记忆被引用次数，>=5次延长TTL |
+| `upsert_session_memory` | ~4599 | 写入短期记忆（支持 memory_type + use_count） |
 | `generate_model_text` | ~4492 | LLM 文本生成入口 |
 | `parse_ical_events` | ~1028 | 解析 iCal（含 RRULE 展开、EXDATE 排除） |
 | `get_calendar_events_cached` | ~1166 | 获取日历事件（每日缓存逻辑） |
@@ -285,6 +290,57 @@ SELECT id, direction, body, created_at FROM wa_messages ORDER BY id DESC LIMIT 1
   - `f77c3de`：移到统一接口（calendar system 里，memory_block.today_date）
   - `4cfe961`：日期移到第一行 + 强制指令
   - `c91910a`：用 ISO 格式 + IMPORTANT 前缀 + MUST instruction
+
+---
+
+## v2.1.0 改动记录（2026-04-03）
+
+### 1. 短期记忆时间桶分类修复（「昨天吃了包子」问题）
+- **文件：** `wa_agent.py` `classify_recent_memory_bucket` + `infer_observed_at_from_text`（新增 ~4058行）
+- **问题：** "昨天吃了包子" 被错误分到 `within_24h`，而非正确的 `within_3d`
+- **修复：**
+  - LLM 提示词强化：明确告诉模型时间词指事件发生时间而非说话时间
+  - 新增 `infer_observed_at_from_text()` 从时间词推断事件实际发生时间
+  - `split_memory_clauses()` 不再拆分含时间标记的完整句子（避免碎片化）
+  - `upsert_session_memory()` 支持传入 `observed_at` 参数
+
+### 2. normalize_key 规范化统一
+- **文件：** `wa_agent.py` `normalize_key`（~3041行）、`proactive.py` `_normalize_key`、`db.py` `_normalize_key`
+- **修复：** `re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]", "", value)` 移除中文标点，避免「今日約咗朋友。」和「今日約咗朋友」被识别为不同记忆
+
+### 3. 死代码清理
+- **文件：** `wa_agent.py`
+- **删除：** `extract_live_search_question_memory`（从未被调用）
+
+### 4. Rate Limiting
+- **文件：** `wa_agent.py` `maybe_extract_session_memories`
+- **新增：** per-wa-id 冷却机制（2分钟 `_SESSION_EXTRACTION_COOLDOWN = 120.0`）
+
+### 5. 记忆反馈机制
+- **文件：** `wa_agent.py` `bump_session_memory_use_count`、`select_relevant_memories`、`proactive.py` `_bump_use_count`
+- **DB：** 新增列 `memory_type`（DEFAULT 'event'）、`use_count`（DEFAULT 0）
+- **行为：** 被引用 ≥5 次的记忆自动延长 TTL 至 2 倍
+
+### 6. 记忆应用闭环
+- **文件：** `wa_agent.py`（回复 prompt）、`proactive.py`（主动提示 prompt）
+- **回复：** 新增指令优先引用短期记忆（24h > 3d > 7d）
+- **主动：** 明确优先用 24h 记忆，避免重复用同一条
+
+### 7. 管理页面统计
+- **文件：** `susu-memory-admin.html`、`susu_admin_core.py`
+- **新增：** 本周新增记忆数、平均引用次数、未使用记忆数
+
+### 8. 统一 memory.py
+- **文件：** `src/wa_agent/memory.py` 全面更新，`RECENT_MEMORY_EXTRACTOR_PROMPT` 同步更新
+- **新增：** `RECENT_24H_MARKERS`、`RECENT_3D_MARKERS`、`RECENT_7D_MARKERS`、`infer_observed_at_from_text`、`MemoryManager.infer_observed_at`
+
+### 9. 测试覆盖
+- **文件：** `tests/wa_agent/test_memory.py`
+- **新增：** `infer_observed_at` / `classify_recent_memory_bucket` / `normalize_key` 集成测试
+
+### 10. 数据库清理 SQL
+- **文件：** `cleanup_session_memories.sql`
+- 用途：查看/删除噪音短期记忆（超短内容、纯问候句、重复记忆、过期记忆）
 
 ---
 

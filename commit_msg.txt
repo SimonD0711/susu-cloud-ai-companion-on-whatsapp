@@ -1,0 +1,15 @@
+feat: 全面重构短期记忆系统 — 修复时间桶分类、提升抽取质量、新增反馈机制
+
+主要改动：
+- fix: normalize_key 移除中文标点避免重复记忆
+- fix: 删除从未调用的死代码 extract_live_search_question_memory
+- feat: 强化 LLM 抽取提示词 — 明确时间词→bucket映射
+- fix: 启发式回退不再碎片化，新增 infer_observed_at_from_text
+- feat: 添加 per-wa_id rate limiting (2分钟冷却)
+- feat: 回复/主动提示中优先使用最近桶的记忆
+- feat: 添加 use_count 追踪，被引用>=5次延长TTL
+- feat: 新增 memory_type + use_count 数据库列
+- feat: 管理页面新增本周新增/平均引用/未使用记忆统计
+- feat: 全面更新 memory.py 为记忆函数的事实来源
+- test: 新增 infer_observed_at / classify_bucket / normalize_key 集成测试
+- docs: 添加清理噪音短期记忆的 SQL 脚本
