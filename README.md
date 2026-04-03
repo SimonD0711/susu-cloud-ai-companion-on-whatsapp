@@ -1,199 +1,311 @@
-# Susu Cloud - AI Companion on WhatsApp
+# Susu Cloud — AI Companion on WhatsApp
 
 [![Release v2.1.0](https://img.shields.io/badge/Release-v2.1.0-brightgreen.svg)](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![CI](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/actions/workflows/ci.yml/badge.svg)](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/actions)
+[![Code style: ruff](https://img.shields.io/badge/Code%20style-ruff-red.svg)](https://github.com/astral-sh/ruff)
+
+> A human-like AI companion for WhatsApp with layered memory, proactive engagement, and calendar integration.
 
 ---
 
-### 🌐 Language Selection / 語言選擇 / 语言选择
-- [繁體中文/粵語](#-繁體中文粵語)
-- [简体中文/普通话](#-简体中文普通话)
-- [English](#-english)
+## Table of Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Project Structure](#project-structure)
+- [Environment Variables](#environment-variables)
+- [Development](#development)
+- [License](#license)
 
 ---
 
-### 🇭🇰 [繁體中文/粵語] 蘇蘇雲端 AI 伴侶
-Susu Cloud 係一個專為 WhatsApp 而設嘅智能 AI 伴侶，透過 Brain Bridge 架構，將 AI 變成好似真人一樣咁自然、貼心。
+## Features
 
-#### 版本 2.1.0 更新內容 (v2.0.0 -> v2.1.0)
-
-**🧠 短期記憶系統全面重構**
-*   「昨天吃了包子」等時間描述現正正確分到 3 天桶（而非錯誤地分到今日）
-*   LLM 抽取提示詞大幅強化：明確時間詞→桶映射、傳入已有記憶做去重
-*   啟發式回退不再碎片化，新增 `infer_observed_at_from_text()` 從時間詞推斷事件實際發生時間
-*   統一 `normalize_key()` 移除中文標點，避免「今日約咗朋友。」與「今日約咗朋友」被錯誤識別為不同記憶
-*   刪除從未調用的死代碼 `extract_live_search_question_memory`
-
-**⚡ Rate Limiting 優化**
-*   新增 per-wa-id 冷卻機制（2 分鐘），避免每條消息都觸發抽取
-
-**🔄 反饋機制**
-*   新增 `use_count` 追蹤記憶被引用次數
-*   被引用 ≥5 次的記憶自動延長 TTL 至 2 倍
-*   管理頁面新增統計：本周新增記憶數、平均引用次數、未使用記憶數
-
-**💬 記憶應用閉環**
-*   主動訊息提示詞明確優先使用 24 小時內記憶
-*   回復引擎主動引用相關短期記憶
-
-#### 版本 2.0.0 更新內容 (v1.0.0 -> v2.0.0)
-
-**🗓️ 日曆系統整合**
-*   接入 Google Calendar iCal，每日自動緩存，零延遲讀取
-*   香港公眾假期（2026/2027）自動判斷，繁體顯示
-*   CityU 學期狀態自動偵測（考試週 / 學期中 / 假期中）
-*   System Prompt 注入今日日期，永不忘記幾號
-
-**📍 智能位置系統**
-*   普通話 Prompt 重寫，地點提取更準確
-*   香港以外地點自動觸發「用戶在放假期」記憶（深圳除外）
-*   歸檔查詢時間標記大幅擴展（昨天/前天/大前天/尋晚/琴晚/頭先/上次...）
-
-**🎛️ 記憶管理後台全面改版**
-*   卡片資訊層級重組（頂欄 + 摘錄預覽 + 底部時間）
-*   手機適配：500px / 360px 雙重 breakpoint，按鈕統一 44×44px
-*   內容超過 150 字自動截斷 + 「全文」按鈕
-*   長期記憶、星級重要性選擇、語音模式 / 位置 Special Badge
-
-**🔧 功能改進**
-*   短期記憶手動續期（🔄 7 天）
-*   歸檔記憶提升為長期（⬆ 一鍵操作）
-*   批量選擇 + 批量刪除 / 續期 / 提升
-*   Memory Extraction LLM 節流（5 分鐘冷卻）
-*   normalize_key 修復（不再錯誤合併不同內容）
-*   System Prompt 日期強制注入（IMPORTANT 前綴 + ISO 格式）
-
-#### 版本 1.0.0 更新內容 (v0.1.5 -> v1.0.0)
-*   **Brain Bridge 架構**：全面取代過時嘅 SillyTavern 整合，改用更穩定、更靈活嘅 Brain Bridge 架構。
-*   **智能記憶級聯 (Bucket Cascade)**：引入 24 小時/3天/7天/歸檔分層機制，配合自動 Q&A 合成，對話銜接更自然。
-*   **任務智能路由**：識分學業 Quiz、assignment 截止日期、定係日常閒聊，回覆更到位。
-*   **代碼清理**：徹底移除了歷史遺留嘅檔案與舊版本架構殘留。
-
-#### 功能列表
-*   **WhatsApp Webhook 運行時**：實時處理 WhatsApp 訊息，支援文本與圖片識別。
-*   **分層記憶系統**：自動將資訊分為長期、短期（24h/3d/7d）及歸檔層，避免資訊過載。
-*   **自動知識合成**：系統會自動總結 Q&A 對話，將重要知識保存為短期記憶。
-*   **聯網搜索路由**：接入即時資訊，配合審核機制，減少幻覺。
-*   **主動訊息推送**：根據靜默時間、當前時段與心率模型，自動發送暖心問候。
-*   **網頁版後台管理**：直接透過網頁端檢視聯繫人記憶、提醒及調整運行策略。
+| | | |
+|---|---|---|
+| 🧠 **Layered Memory** | 🗓️ **Calendar Integration** | 💬 **Proactive Messaging** |
+| Long-term + session buckets (24h / 3d / 7d / archive) with automatic Q&A synthesis | Google Calendar iCal sync, HK public holidays, CityU semester states | Non-intrusive greetings based on silence time, time-of-day style profiles |
+| 📍 **Smart Location** | 🔍 **Live Search** | 🎛️ **Admin Web UI** |
+| LLM-powered location extraction, auto holiday detection | Tavily, Bing, OpenWeather, YouTube, Spotify, Reddit, X search routing | Browser-based memory management, reminders, and settings control |
 
 ---
 
-### 🇨🇳 [简体中文/普通话] Susu Cloud AI 伴侣
-Susu Cloud 是专为 WhatsApp 打造的智能 AI 伴侣。通过 Brain Bridge 架构，我们实现了更自然、更具人性化的对话体验。
+## Architecture
 
-#### 版本 2.0.0 更新内容 (v1.0.0 -> v2.0.0)
+```
+ WhatsApp Cloud API
+        │
+        ▼
+┌───────────────────┐
+│  wa_agent.py      │  Webhook Receiver + Reply Engine
+│  (port 9100)      │  • Extract messages from webhook payload
+└────────┬──────────┘  • Spawn reply subprocess
+         │              • Trigger proactive messaging loop
+         ▼
+┌───────────────────┐     ┌─────────────────────────┐
+│  Brain Bridge     │────▶│  LLM (Claude via Relay)│
+│  (build_runtime_  │     └─────────────────────────┘
+│   context)        │
+│                   │     ┌─────────────────────────┐
+│  Memory Cascade   │────▶│  SQLite Database       │
+│  (Bucket System)  │     │  wa_agent.db           │
+└───────────────────┘     └─────────────────────────┘
+         │
+         ▼
+┌───────────────────┐     ┌─────────────────────────┐
+│  Admin Web Server │────▶│  Browser Admin UI       │
+│  (port 9001)      │     │  susu-memory-admin.html │
+└───────────────────┘     └─────────────────────────┘
+```
 
-**🗓️ 日历系统整合**
-*   接入 Google Calendar iCal，每日自动缓存，零延迟读取
-*   香港公众假期（2026/2027）自动判断，繁体显示
-*   CityU 学期状态自动侦测（考试周 / 学期中 / 假期中）
-*   System Prompt 注入今日日期，永不忘记几号
+**Memory Bucket Cascade:**
 
-**📍 智能位置系统**
-*   普通话 Prompt 重写，地点提取更准确
-*   香港以外地点自动触发「用户在放假期」记忆（深圳除外）
-*   归档查询时间标记大幅扩展（昨天/前天/大前天/寻晚/琴晚/头先/上次...）
-
-**🎛️ 记忆管理后台全面改版**
-*   卡片信息层级重组（顶栏 + 摘录预览 + 底部时间）
-*   手机适配：500px / 360px 双重 breakpoint，按钮统一 44×44px
-*   内容超过 150 字自动截断 + 「全文」按钮
-*   长期记忆、星级重要性选择、语音模式 / 位置 Special Badge
-
-**🔧 功能改进**
-*   短期记忆手动续期（🔄 7 天）
-*   归档记忆提升为长期（⬆ 一键操作）
-*   批量选择 + 批量删除 / 续期 / 提升
-*   Memory Extraction LLM 节流（5 分钟冷却）
-*   normalize_key 修复（不再错误合并不同内容）
-*   System Prompt 日期强制注入（IMPORTANT 前缀 + ISO 格式）
-
-#### 版本 1.0.0 更新内容 (v0.1.5 -> v1.0.0)
-*   **Brain Bridge 架构**：模块化设计，大幅提升了模型通信效率与稳定性。
-*   **多层级记忆系统**：支持自动记忆分类与衰减，自动合成关键对话点，实现高效的上下文衔接。
-*   **任务智能路由**：优化了学术安排与日常任务的处理逻辑，确保优先匹配上下文。
-*   **仓库深度重构**：移除了所有无关的历史代码，实现了真正的 v1.0.0 纯净发布。
-
-#### 功能列表
-*   **WhatsApp 运行时**：响应 Meta WhatsApp Cloud API，处理多媒体信息，实现连贯的上下文合并回复。
-*   **多层级存储**：SQLite 后端管理长期记忆与短期记忆 bucket，支持过期自动归档。
-*   **智能知识提炼**：自动将对话中的交互转化为知识点，提升模型对用户习惯的理解力。
-*   **联网与搜索**：针对即时需求进行联网检索，配合 Query Reviewer 降低幻觉风险。
-*   **主动策略机制**：根据活跃度评估、时间策略，实现低干扰的主动关怀。
-*   **Web 控制台**：集成了联系人管理、记忆库编辑、参数调试的轻量级后台界面。
+```
+ Message → LLM Extraction
+   ├── 24h bucket     (very recent — highest priority)
+   ├── 3-day bucket   (within 3 days)
+   ├── 7-day bucket   (within 1 week)
+   ├── Archive bucket (older, queryable by time markers)
+   └── Long-term      (permanent profile knowledge)
+```
 
 ---
 
-### 🇺🇸 [English] Susu Cloud AI Companion
-Susu Cloud is an advanced AI companion tailored for WhatsApp. Built on the Brain Bridge architecture, it offers a human-like, memory-rich conversational experience.
+## Quick Start
 
-#### Release 2.1.0 Highlights (v2.0.0 -> v2.1.0)
+### Prerequisites
 
-**🧠 Session Memory System Overhaul**
-*   "昨天吃了包子" now correctly classified as 3-day bucket (not wrongly tagged as today)
-*   LLM extraction prompt strengthened: explicit time-word→bucket mapping, passes existing memories for deduplication
-*   Heuristic fallback no longer fragments sentences; new `infer_observed_at_from_text()` infers event time from time markers
-*   Unified `normalize_key()` removes Chinese punctuation — prevents "今日約咗朋友。" and "今日約咗朋友" being treated as different memories
-*   Removed dead code `extract_live_search_question_memory`
+- Python 3.11+
+- WhatsApp Business Cloud API account ([Meta Developer Console](https://developers.facebook.com/apps/))
+- Relay API key (Claude-compatible endpoint)
+- MiniMax API key (for voice synthesis)
 
-**⚡ Rate Limiting**
-*   Per-wa-id cooldown (2 minutes) prevents extraction on every message
+### 1. Clone & Install
 
-**🔄 Feedback Mechanism**
-*   New `use_count` tracks how many times each memory is referenced
-*   Memories referenced ≥5 times automatically get 2× TTL extension
-*   Admin UI new stats: weekly new memories, avg reference count, unused memories
+```bash
+git clone https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp.git
+cd susu-cloud-ai-companion-on-whatsapp
+pip install -r requirements.txt
+```
 
-**💬 Memory Application Loop**
-*   Proactive prompt explicitly prioritizes 24h memories as conversation hooks
-*   Reply engine actively references relevant session memories
+### 2. Configure Environment
 
-#### Release 2.0.0 Highlights (v1.0.0 -> v2.0.0)
+```bash
+# Copy the environment template
+cp .env.example .env
 
-**🗓️ Calendar Integration**
-*   Google Calendar iCal sync with daily caching — zero latency on subsequent reads
-*   HK public holidays 2026/2027 auto-detected and displayed in Traditional Chinese
-*   CityU semester state auto-inferred (exam week / in-semester / holiday)
-*   Today's date injected into system prompt — Susu always knows the date
+# Edit .env and fill in your keys
+# Required: WA_VERIFY_TOKEN, WA_ACCESS_TOKEN, WA_PHONE_NUMBER_ID
+# Required: WA_RELAY_API_KEY, WA_MINIMAX_API_KEY
+```
 
-**📍 Smart Location System**
-*   Mandarin prompt rewrite for better location extraction accuracy
-*   Non-HK locations (except Shenzhen) auto-generate "user is on holiday" memory
-*   Archive lookup time markers expanded (昨天/前天/大前天/尋晚/琴晚/頭先/上次...)
+### 3. Set Admin Password
 
-**🎛️ Memory Admin UI Redesign**
-*   Card layout restructured — top bar + excerpt preview + footer timestamps
-*   Mobile-first: 500px / 360px breakpoints, 44×44px touch targets
-*   Content auto-truncated at 150 chars with "expand" toggle
-*   Importance star picker, Voice Mode / Location special badges
+```bash
+python tools/hash_password.py "your-secure-password"
+# Copy the output salt and hash into your .env:
+# SUSU_ADMIN_PASSWORD_SALT_B64=...
+# SUSU_ADMIN_PASSWORD_HASH_B64=...
+# SUSU_ADMIN_SESSION_SECRET=...
+```
 
-**🔧 Functional Improvements**
-*   Session memory manual renewal (🔄 +7 days)
-*   Archive → Long-term promotion (⬆ one-click)
-*   Batch select + batch delete/renew/promote
-*   Memory Extraction LLM throttling (5-min cooldown)
-*   normalize_key fixed — no more false content merging
-*   System prompt date enforcement (IMPORTANT prefix + ISO format)
+### 4. Run
 
-#### Release 1.0.0 Highlights (v0.1.5 -> v1.0.0)
-*   **Brain Bridge Integration**: Migrated from legacy SillyTavern to a robust, decoupled bridge-backed brain.
-*   **Memory Cascade System**: Implemented bucket-based storage (24h/3d/7d/archive) with automatic Q&A synthesis.
-*   **Context-Aware Routing**: Specialized logic for academic schedule queries and assignments to ensure precision.
-*   **Repository Cleanliness**: Full architectural reset, purging historical files and standardizing the codebase.
+```bash
+# Terminal 1 — WhatsApp agent (port 9100)
+python wa_agent.py
 
-#### Key Features
-*   **WhatsApp Webhook Runtime**: Handles events, text/image processing, and merges messages into a unified reply context.
-*   **Layered Memory Database**: Persistent SQL storage for long-term profiles, session contexts, and archives.
-*   **Autonomous Knowledge Extraction**: Automatically distills Q&A turns into permanent memory.
-*   **Proactive Engagement**: Triggers non-intrusive messages based on silence time and time-of-day style profiles.
-*   **Browser-based Admin UI**: Manage memories, system prompts, and reminders via a dedicated local admin interface.
+# Terminal 2 — Admin web server (port 9001)
+python susu_admin_server.py
+```
+
+### 5. Set Up WhatsApp Webhook
+
+1. Go to [Meta Developer Console](https://developers.facebook.com/apps/)
+2. Create a WhatsApp Business app
+3. Add the **Webhook** product
+4. Set callback URL to `https://your-domain.com/webhook`
+5. Set verify token to match `WA_VERIFY_TOKEN` in `.env`
+6. Subscribe to `messages` field
+
+### Docker Deployment
+
+```bash
+# Build
+docker build -t susu-cloud .
+
+# Run
+docker run -d \
+  --name susu-cloud \
+  -p 9100:9100 \
+  -p 9001:9001 \
+  --env-file .env \
+  -v $(pwd)/wa_agent.db:/var/www/html/wa_agent.db \
+  susu-cloud
+```
 
 ---
 
-### 🛠 Setup & Deployment
-1. **Config**: `Copy-Item .env.example .env`
-2. **Password**: `python .\tools\hash_password.py "password"`
-3. **Run**: `python .\wa_agent.py` & `python .\susu_admin_server.py`
+## Project Structure
+
+```
+susu-cloud/
+├── wa_agent.py                    # Main agent (monolith) — HTTP server, webhook, reply pipeline
+├── susu_admin_server.py           # Admin API server (port 9001)
+├── susu_admin_core.py             # Admin backend — memory CRUD, settings, auth
+├── susu-memory-admin.html         # Admin web UI (single-page, no framework)
+├── requirements.txt               # Dev dependencies (pytest, ruff)
+├── .env.example                  # Environment variables template
+├── Dockerfile                    # Docker container definition
+├── docker-entrypoint.sh          # Container startup script
+│
+├── src/
+│   ├── ai/                       # Unified AI capability layer
+│   │   ├── config.py             # AIConfig dataclass (all AI env vars)
+│   │   ├── base.py               # Abstract LLMProvider base class
+│   │   ├── llm/
+│   │   │   ├── manager.py         # LLMManager with fallback logic
+│   │   │   ├── relay.py           # RelayProvider (Claude via relay)
+│   │   │   └── prompts.py         # Centralized system prompts
+│   │   ├── tts/
+│   │   │   ├── minimax.py         # MiniMax TTS wrapper
+│   │   │   └── voices.py
+│   │   ├── whisper/
+│   │   │   └── groq.py           # Groq Whisper transcription
+│   │   └── search/               # Unified search router + providers
+│   │       ├── router.py          # LLM-driven search routing
+│   │       ├── weather.py         # HK Observatory + OpenWeatherMap
+│   │       ├── news.py            # Tavily, Google News, Bing, Reddit, X
+│   │       ├── music.py           # iTunes, Spotify, YouTube
+│   │       └── web.py             # Tavily, Bing, DuckDuckGo, Reddit
+│   │
+│   └── wa_agent/                 # Modular agent components (refactor in progress)
+│       ├── server.py              # HTTP server entry point
+│       ├── brain.py               # Reply generation
+│       ├── memory.py              # Memory extraction + storage
+│       ├── proactive.py           # Proactive messaging engine
+│       ├── reminders.py           # Reminder detection + delivery
+│       ├── voice.py               # Voice message processing
+│       ├── whatsapp.py            # WhatsApp Business API wrapper
+│       ├── db.py                  # MemoryDB SQLite wrapper
+│       ├── auth.py                # Admin authentication
+│       └── utils.py               # Utility functions
+│
+├── tests/                         # pytest test suite
+│   ├── conftest.py               # Global fixtures
+│   ├── ai/                       # AI layer tests
+│   └── wa_agent/                 # Agent module tests
+│
+├── HANDOVER.md                   # Operations manual (production details)
+├── REFACTOR-PLAN.md              # Architecture refactor plan
+└── .github/
+    ├── workflows/ci.yml         # CI/CD pipeline
+    ├── CONTRIBUTING.md          # Contribution guide
+    ├── ISSUE_TEMPLATE/          # Bug report & feature request templates
+    └── PULL_REQUEST_TEMPLATE.md  # PR template
+```
 
 ---
+
+## Environment Variables
+
+See [`.env.example`](.env.example) for the full list with descriptions. Key variables:
+
+| Variable | Required | Description |
+|---|---|---|
+| `WA_VERIFY_TOKEN` | Yes | WhatsApp webhook verify token |
+| `WA_ACCESS_TOKEN` | Yes | Meta long-lived user access token |
+| `WA_PHONE_NUMBER_ID` | Yes | WhatsApp Phone Number ID |
+| `WA_RELAY_API_KEY` | Yes | Relay API key for Claude requests |
+| `WA_MINIMAX_API_KEY` | Yes | MiniMax API key for TTS |
+| `WA_PROACTIVE_ENABLED` | No | Enable proactive messaging (default: 1) |
+| `WA_USER_ICAL_URL` | No | Google Calendar iCal URL |
+| `SUSU_ADMIN_PASSWORD_HASH_B64` | Yes | Admin password hash (base64) |
+
+Generate admin credentials:
+
+```bash
+python tools/hash_password.py "your-password"
+```
+
+---
+
+## Development
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run all tests
+pytest tests/ -v
+
+# Lint code
+ruff check .
+
+# Auto-fix lint issues
+ruff check . --fix
+```
+
+---
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+## Language Versions
+
+- [English (above)](#susu-cloud--ai-companion-on-whatsapp)
+- [简体中文](README.md#-简体中文普通话-susu-cloud-ai-伴侣)
+- [繁體中文/粵語](README.md#-繁體中文粵語-蘇蘇雲端-ai-伴侶)
+
+---
+
+## Changelog
+
+### v2.1.0 (2026-04-03)
+
+**Session Memory System Overhaul**
+- "昨天吃了包子" now correctly classified as 3-day bucket (not wrongly tagged as today)
+- LLM extraction prompt strengthened: explicit time-word→bucket mapping, passes existing memories for deduplication
+- Heuristic fallback no longer fragments sentences; new `infer_observed_at_from_text()` infers event time from time markers
+- Unified `normalize_key()` removes Chinese punctuation — prevents false memory merging
+- Removed dead code `extract_live_search_question_memory`
+
+**Rate Limiting**
+- Per-wa-id cooldown (2 minutes) prevents extraction on every message
+
+**Feedback Mechanism**
+- New `use_count` tracks memory reference count
+- Memories referenced ≥5 times automatically get 2× TTL extension
+- Admin UI new stats: weekly new memories, avg reference count, unused memories
+
+**Memory Application Loop**
+- Proactive prompt explicitly prioritizes 24h memories as conversation hooks
+- Reply engine actively references relevant session memories
+
+### v2.0.0 (2026-04-01)
+
+- Google Calendar iCal sync with daily caching
+- HK public holidays 2026/2027 auto-detected
+- CityU semester state auto-inferred
+- System prompt date enforcement
+- Smart location system with holiday detection
+- Memory admin UI redesign (mobile-first)
+- Batch operations (delete/renew/promote)
+- Memory Extraction LLM throttling
+
+### v1.0.0
+
+- Brain Bridge architecture — migrated from SillyTavern
+- Memory Cascade System (24h/3d/7d/archive buckets)
+- Context-Aware Routing for academic and daily tasks
+- Full repository clean-up
+
+---
+
 *Developed with ❤️ for WhatsApp.*

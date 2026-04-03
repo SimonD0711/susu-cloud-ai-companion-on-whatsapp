@@ -4,6 +4,13 @@ __pycache__/
 *.egg-info/
 .env
 .env.*
+!.env.example
 *.bak.*
 wa_agent.db
 engagement.db
+wa_agent.db-journal
+.pytest_cache/
+htmlcov/
+*.egg
+dist/
+build/
