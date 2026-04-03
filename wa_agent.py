@@ -6257,8 +6257,10 @@ Reply rules:
 
 def build_structured_context_from_runtime_context(runtime_context):
     memory_block = runtime_context["memory_block"]
+    today_date = memory_block.get("today_date") or ""
     system_parts = [
         runtime_context["persona_block"],
+        f"今日日期：{today_date}（回答用戶問題前必須確認今天確實係呢日。）",
         f"Display name: {runtime_context['profile_name'] or 'the user'}",
         "Current task state:\n" + format_task_state_block(runtime_context["task_state"]),
     ]
