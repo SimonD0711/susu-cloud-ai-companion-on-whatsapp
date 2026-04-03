@@ -409,11 +409,124 @@
 
     mark.hl { background: #ffeb3b; color: #000; border-radius: 2px; padding: 0 2px; }
 
+    /* ---- entry card restructured layout ---- */
+    .entry-card { border-radius: 20px; padding: 0; overflow: hidden; }
+
+    .entry-topbar {
+      display: flex; align-items: center;
+      gap: 10px; padding: 14px 16px 10px;
+    }
+    .entry-topbar .batch-checkbox { flex-shrink: 0; width: 20px; height: 20px; cursor: pointer; }
+    .entry-meta-row {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1;
+    }
+    .entry-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+    .entry-key {
+      display: inline-flex; align-items: center;
+      padding: 2px 10px; border-radius: 999px;
+      font-size: 12px; font-weight: 700;
+      background: rgba(31, 111, 178, 0.1); color: var(--accent);
+    }
+    .entry-key.character { background: rgba(92, 214, 221, 0.18); color: #1a6b70; }
+    .entry-key.memory { background: rgba(124, 180, 255, 0.2); color: #1a4a80; }
+    .entry-key.session { background: rgba(92, 214, 221, 0.18); color: #1a6b70; }
+    .entry-key.reminder { background: rgba(255, 211, 123, 0.22); color: var(--warn); }
+
+    .entry-tokens {
+      font-size: 12px; color: var(--muted);
+      background: rgba(91, 122, 140, 0.08); border-radius: 999px; padding: 2px 8px;
+    }
+    .entry-tokens.active { background: rgba(17, 108, 77, 0.12); color: var(--success); }
+    .entry-tokens.expired { background: rgba(214, 75, 99, 0.12); color: var(--danger); }
+
+    .importance-stars { display: inline-flex; gap: 1px; font-size: 13px; }
+    .importance-stars .star { color: #d4a017; }
+    .importance-stars .star.empty { color: #d4a017; opacity: 0.2; }
+
+    .source-badge {
+      display: inline-flex; align-items: center;
+      padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    }
+    .source-badge.auto { background: rgba(92, 214, 221, 0.22); color: #1a6b70; }
+    .source-badge.setting { background: rgba(124, 180, 255, 0.22); color: #1a4a80; }
+    .source-badge.manual { background: rgba(31, 111, 178, 0.12); color: var(--accent); }
+
+    .entry-uid { font-size: 12px; color: var(--muted); margin: 0 4px; }
+
+    .entry-divider { border: none; border-top: 1px solid var(--line); margin: 0; }
+
+    .entry-excerpt {
+      padding: 10px 16px;
+      font-size: 14px; line-height: 1.75;
+      color: var(--text); position: relative;
+    }
+    .entry-excerpt.truncated { cursor: pointer; }
+    .excerpt-toggle-btn {
+      background: none; border: none; cursor: pointer;
+      color: var(--accent); font-size: 13px;
+      padding: 2px 0; margin-top: 4px;
+      display: inline-block;
+    }
+    .excerpt-toggle-btn:hover { text-decoration: underline; }
+
+    .entry-footer {
+      padding: 8px 16px 12px;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    }
+    .entry-time { font-size: 12px; color: var(--muted); }
+    .entry-time.expiring-soon { color: var(--danger); font-weight: 600; }
+    .entry-time.expiring-warn { color: var(--warn); font-weight: 600; }
+
+    /* ---- action buttons ---- */
+    .entry-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 40px; min-height: 40px; border-radius: 10px;
+      border: 1px solid var(--line); background: rgba(255, 255, 255, 0.8);
+      cursor: pointer; transition: transform 150ms; font-size: 16px;
+    }
+    .entry-btn:hover { transform: scale(1.06); }
+    .entry-btn.del { color: var(--danger); }
+
+    /* ---- star picker (modal) ---- */
+    .star-btn { min-width: 40px; min-height: 40px; font-size: 22px !important; border-radius: 8px; transition: transform 120ms, opacity 120ms; }
+    .star-btn:hover { transform: scale(1.15); }
+    .star-btn.selected { transform: scale(1.2); }
+
+    /* ---- responsive ---- */
     @media (max-width: 700px) {
       .site-header { border-radius: 28px; flex-direction: column; align-items: flex-start; }
       .header-actions { justify-content: flex-start; }
       .summary-grid { grid-template-columns: 1fr 1fr; }
       .settings-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 500px) {
+      .wrap { padding: 12px; }
+      .panel { padding: 16px; border-radius: 20px; }
+      .panel h1 { font-size: 26px; }
+      .summary-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+      .summary-value { font-size: 22px; }
+      .segmented { gap: 6px; }
+      .segmented button { min-height: 32px; padding: 0 10px; font-size: 13px; border-radius: 999px; }
+      .toolbar { gap: 8px; }
+      .toolbar button { min-height: 36px; padding: 0 12px; font-size: 13px; }
+      .toolbar .grow { min-width: 160px; }
+      .batch-toolbar { flex-wrap: wrap; gap: 6px; padding: 8px 10px; }
+      .batch-toolbar button { min-height: 36px; font-size: 12px; padding: 0 10px; }
+      .entry-topbar { padding: 10px 12px 8px; gap: 8px; }
+      .entry-meta-row { gap: 5px; }
+      .entry-btn { min-width: 44px; min-height: 44px; font-size: 17px; border-radius: 12px; }
+      .entry-excerpt { padding: 8px 12px; font-size: 13px; }
+      .entry-footer { padding: 6px 12px 10px; }
+    }
+
+    @media (max-width: 360px) {
+      .summary-grid { grid-template-columns: 1fr; }
+      .batch-toolbar { flex-direction: column; align-items: stretch; }
+      .batch-toolbar button { text-align: center; }
+      .segmented button { font-size: 12px; padding: 0 8px; }
+      .toolbar .grow { min-width: 0; flex: 1 1 100%; }
     }
   </style>
 </head>
@@ -842,134 +955,137 @@
     return `<span class="entry-tokens ${extraClass}">${esc(label)}</span>`;
   }
 
+  const EXCERPT_LEN = 150;
+
+  function excerptHtml(raw, term) {
+    const plain = String(raw ?? '');
+    const safePlain = esc(plain);
+    if (!plain || plain.length <= EXCERPT_LEN) {
+      return `<div class="entry-excerpt">${hl(safePlain, term)}</div>`;
+    }
+    const truncated = esc(plain.slice(0, EXCERPT_LEN));
+    const highlighted = hl(truncated, term);
+    return `<div class="entry-excerpt truncated" data-full="${safePlain.replace(/"/g, '&quot;')}">
+      ${highlighted}…
+      <button class="excerpt-toggle-btn" type="button">全文 ⬇</button>
+    </div>`;
+  }
+
+  function expiresClass(expiresAt) {
+    if (!expiresAt) return '';
+    const now = Date.now();
+    const diff = new Date(expiresAt).getTime() - now;
+    if (diff < 0) return 'expired';
+    if (diff < 2 * 24 * 60 * 60 * 1000) return 'expiring-soon';
+    if (diff < 4 * 24 * 60 * 60 * 1000) return 'expiring-warn';
+    return 'active';
+  }
+
   function renderEntry(item) {
     function importanceStars(val) {
-      const n = val || 3;
-      let html = '<div class="importance-stars">';
-      for (let i = 1; i <= 5; i++) {
-        html += `<span class="star ${i <= n ? '' : 'empty'}">★</span>`;
-      }
-      html += '</div>';
-      return html;
+      const n = val || 0;
+      let h = '<div class="importance-stars">';
+      for (let i = 1; i <= 5; i++) h += `<span class="star${i <= n ? '' : ' empty'}">★</span>`;
+      h += '</div>';
+      return h;
     }
     function sourceBadge(kind) {
       const cls = kind === 'auto' ? 'auto' : kind === 'setting' ? 'setting' : 'manual';
       const label = kind === 'auto' ? 'LLM抽取' : kind === 'setting' ? '系統設定' : '手動新增';
       return `<span class="source-badge ${cls}">${esc(label)}</span>`;
     }
+    const term = searchText.trim();
+    const expCls = expiresClass(item.expires_at);
 
     if (activeTab === 'long') {
       return `
 <div class="entry-card" data-entry-id="${item.id}">
-  <div class="entry-header">
-    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
-      <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="memory">
-    </div>
-    <div class="entry-meta">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        ${sourceBadge(item.kind)}
-        ${badgeHtml(`Key: ${item.memory_key || '—'}`)}
-        ${importanceStars(item.importance)}
-      </div>
-      <span class="entry-user">${esc(item.wa_id)}</span>
-      <span class="entry-time">建立：${fmt(item.created_at)} ・ 更新：${fmt(item.updated_at)}</span>
+  <div class="entry-topbar">
+    <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="memory">
+    <div class="entry-meta-row">
+      ${importanceStars(item.importance)}
+      ${sourceBadge(item.kind)}
     </div>
     <div class="entry-actions">
-      <button class="entry-btn expand-btn" title="展開/摺疊">⬇</button>
-      <button class="entry-btn edit-btn" title="編輯" data-id="${item.id}">✏️</button>
-      <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="memory" data-label="這條長期記憶">🗑️</button>
+      <button class="entry-btn expand-btn" title="展開">⬇</button>
+      <button class="entry-btn edit-btn" data-id="${item.id}">✏️</button>
+      <button class="entry-btn del delete-btn" data-id="${item.id}" data-type="memory" data-label="這條長期記憶">🗑️</button>
     </div>
   </div>
-  <div class="entry-body collapsed">${hl(item.content, searchText.trim())}</div>
+  <hr class="entry-divider">
+  ${excerptHtml(item.content, term)}
+  <div class="entry-footer">
+    <span class="entry-time">建立 ${fmt(item.created_at)}</span>
+    <span class="entry-time">更新 ${fmt(item.updated_at)}</span>
+  </div>
 </div>`;
     }
 
     if (activeTab === 'session') {
       return `
 <div class="entry-card">
-  <div class="entry-header">
-    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
-      <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="session">
-    </div>
-    <div class="entry-meta">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="entry-key session">${esc(item.bucket_label || item.bucket || 'within_7d')}</span>
-        ${badgeHtml(item.is_expired ? '已過期' : '仍有效', item.is_expired ? 'expired' : 'active')}
-      </div>
-      <span class="entry-user">${esc(item.wa_id)}</span>
-      <span class="entry-time">時間碼：${fmt(item.observed_at || item.updated_at)} ・ 更新：${fmt(item.updated_at)} ・ 到期：${fmt(item.expires_at)}</span>
+  <div class="entry-topbar">
+    <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="session">
+    <div class="entry-meta-row">
+      <span class="entry-key session">${esc(item.bucket_label || item.bucket || 'within_7d')}</span>
+      ${item.is_expired ? badgeHtml('已過期', 'expired') : badgeHtml('仍有效', expCls)}
     </div>
     <div class="entry-actions">
-      <button class="entry-btn expand-btn" title="展開/摺疊">⬇</button>
-      <button class="entry-btn renew-btn" title="续期7天" data-id="${item.id}">🔄</button>
-      <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="session" data-label="這條短期記憶">🗑️</button>
+      <button class="entry-btn expand-btn" title="展開">⬇</button>
+      <button class="entry-btn renew-btn" data-id="${item.id}">🔄</button>
+      <button class="entry-btn del delete-btn" data-id="${item.id}" data-type="session" data-label="這條短期記憶">🗑️</button>
     </div>
   </div>
-  <div class="entry-body collapsed">${hl(item.content, searchText.trim())}</div>
+  <hr class="entry-divider">
+  ${excerptHtml(item.content, term)}
+  <div class="entry-footer">
+    <span class="entry-time">發生 ${fmt(item.observed_at || item.updated_at)}</span>
+    <span class="entry-time ${expCls}">到期 ${fmt(item.expires_at)}</span>
+  </div>
 </div>`;
     }
 
     if (activeTab === 'archive') {
       return `
 <div class="entry-card">
-  <div class="entry-header">
-    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
-      <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="archive">
-    </div>
-    <div class="entry-meta">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="entry-key session">${esc(item.source_bucket_label || item.source_bucket || 'within_7d')}</span>
-        ${badgeHtml('已歸檔', 'expired')}
-      </div>
-      <span class="entry-user">${esc(item.wa_id)}</span>
-      <span class="entry-time">發生：${fmt(item.observed_at || item.updated_at)} · 歸檔：${fmt(item.archived_at)}</span>
+  <div class="entry-topbar">
+    <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="archive">
+    <div class="entry-meta-row">
+      <span class="entry-key session">${esc(item.source_bucket_label || item.source_bucket || 'within_7d')}</span>
+      ${badgeHtml('已歸檔', 'expired')}
     </div>
     <div class="entry-actions">
-      <button class="entry-btn expand-btn" title="展開/摺疊">⬇</button>
-      <button class="entry-btn promote-btn" title="提升为长期记忆" data-id="${item.id}">⬆</button>
-      <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="archive" data-label="這條歸檔記憶">🗑️</button>
+      <button class="entry-btn expand-btn" title="展開">⬇</button>
+      <button class="entry-btn promote-btn" data-id="${item.id}">⬆</button>
+      <button class="entry-btn del delete-btn" data-id="${item.id}" data-type="archive" data-label="這條歸檔記憶">🗑️</button>
     </div>
   </div>
-  <div class="entry-body collapsed">${hl(item.content, searchText.trim())}</div>
-</div>`;
-    }
-
-    if (activeTab === 'archive') {
-      return `
-<div class="entry-card">
-  <div class="entry-header">
-    <div class="entry-meta">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="entry-key session">${esc(item.source_bucket_label || item.source_bucket || 'within_7d')}</span>
-        ${badgeHtml('已歸檔', 'expired')}
-      </div>
-      <span class="entry-user">${esc(item.wa_id)}</span>
-      <span class="entry-time">發生：${fmt(item.observed_at || item.updated_at)} · 歸檔：${fmt(item.archived_at)}</span>
-    </div>
-    <div class="entry-actions">
-      <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="archive" data-label="這條歸檔記憶">🗏</button>
-    </div>
+  <hr class="entry-divider">
+  ${excerptHtml(item.content, term)}
+  <div class="entry-footer">
+    <span class="entry-time">發生 ${fmt(item.observed_at || item.updated_at)}</span>
+    <span class="entry-time">歸檔 ${fmt(item.archived_at)}</span>
   </div>
-  <div class="entry-body">${esc(item.content)}</div>
 </div>`;
     }
 
     return `
 <div class="entry-card">
-  <div class="entry-header">
-    <div class="entry-meta">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="entry-key reminder">${item.fired ? '已觸發' : '待觸發'}</span>
-      </div>
-      <span class="entry-user">${esc(item.wa_id)}</span>
-      <span class="entry-time">提醒：${fmt(item.remind_at)} ・ 建立：${fmt(item.created_at)}</span>
+  <div class="entry-topbar">
+    <div class="entry-meta-row">
+      <span class="entry-key reminder">${item.fired ? '已觸發' : '待觸發'}</span>
     </div>
     <div class="entry-actions">
-      <button class="entry-btn reminder-edit-btn" title="編輯" data-id="${item.id}">✏️</button>
-      <button class="entry-btn del delete-btn" title="刪除" data-id="${item.id}" data-type="reminder" data-label="這條提醒事項">🗑️</button>
+      <button class="entry-btn reminder-edit-btn" data-id="${item.id}">✏️</button>
+      <button class="entry-btn del delete-btn" data-id="${item.id}" data-type="reminder" data-label="這條提醒事項">🗑️</button>
     </div>
   </div>
-  <div class="entry-body collapsed">${hl(item.content, searchText.trim())}</div>
+  <hr class="entry-divider">
+  ${excerptHtml(item.content, term)}
+  <div class="entry-footer">
+    <span class="entry-time">提醒 ${fmt(item.remind_at)}</span>
+    <span class="entry-time">建立 ${fmt(item.created_at)}</span>
+  </div>
 </div>`;
   }
 
@@ -1019,7 +1135,24 @@
     document.querySelectorAll('.expand-btn').forEach(btn =>
       btn.addEventListener('click', () => {
         const card = btn.closest('.entry-card');
-        card.querySelector('.entry-body').classList.toggle('collapsed');
+        const ex = card.querySelector('.entry-excerpt');
+        if (!ex) return;
+        if (ex.classList.contains('truncated')) {
+          const full = ex.dataset.full || '';
+          const term = searchText.trim();
+          ex.innerHTML = hl(esc(full), term);
+          ex.classList.remove('truncated');
+        } else {
+          const short = (ex.dataset.full || '').slice(0, EXCERPT_LEN);
+          const term = searchText.trim();
+          ex.innerHTML = hl(esc(short), term) + '…<button class="excerpt-toggle-btn" type="button">全文 ⬇</button>';
+          ex.classList.add('truncated');
+        }
+      }));
+    document.querySelectorAll('.excerpt-toggle-btn').forEach(btn =>
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        btn.closest('.entry-excerpt').querySelector('.expand-btn').click();
       }));
     document.querySelectorAll('.renew-btn').forEach(btn =>
       btn.addEventListener('click', async () => {
@@ -1219,7 +1352,9 @@
   function setEditImportance(val) {
     editImportanceInput.value = val;
     importancePicker.querySelectorAll('.star-btn').forEach(btn => {
-      btn.style.opacity = Number(btn.dataset.val) <= val ? '1' : '0.25';
+      const active = Number(btn.dataset.val) <= val;
+      btn.classList.toggle('selected', active);
+      btn.style.opacity = active ? '1' : '0.25';
     });
   }
 
