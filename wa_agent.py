@@ -894,22 +894,25 @@ def normalize_location(loc_text):
 
 _LOCATION_EXTRACT_PROMPT = textwrap.dedent(
     """
-    你係一個位置偵測器。
+    你是一个位置检测器。
 
-    用戶訊息：{text}
+    用户消息：{text}
 
-    任務：判斷用戶喺呢句話入面有無透露自己當前或規劃中嘅位置。
-    只考慮用戶本人嘅位置，唔好判斷其他人嘅位置。
-    如果有用戶位置資訊，輸出以下格式：
-    {{"location": "具體地點"}}
-    地點要係正規化名稱，例如「長春」「深圳」「香港」「九龍城」「沙田」等。
-    如果冇位置資訊，輸出：
+    任务：判断用户在这句话里有没有透露自己当前或计划中的位置。
+    只考虑用户本人的位置，不要判断其他人的位置。
+    常见的地点变化表达包括："我在X"、"我回了X"、"我到X了"、"我去了X"、"我现在在X"。
+    如果有用户位置信息，输出以下格式：
+    {{"location": "具体地点"}}
+    地点要使用标准名称，例如"长春"、"深圳"、"北京"、"上海"、"香港"、"九龙城"、"沙田"等。
+    如果没有位置信息，输出：
     {{"location": null}}
-    只輸出 JSON，唔好加任何解釋。
+    只输出 JSON，不要加任何解释。
     """
 ).strip()
 
 def extract_location_from_text(text):
+    if not text:
+        return None
     raw = clean_text(text)
     if not raw or len(raw) > 200:
         return None
@@ -972,7 +975,7 @@ def maybe_update_user_location(conn, wa_id, text):
     if not detected:
         return
     current = get_current_location(conn, wa_id)
-    if current == detected:
+    if current and current.get("content") == detected:
         return
     now = utc_now()
     try:
