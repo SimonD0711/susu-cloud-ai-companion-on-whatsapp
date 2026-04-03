@@ -314,7 +314,7 @@ SELECT id, direction, body, created_at FROM wa_messages ORDER BY id DESC LIMIT 1
 
 ### 4. Rate Limiting
 - **文件：** `wa_agent.py` `maybe_extract_session_memories`
-- **新增：** per-wa-id 冷却机制（30秒 `_SESSION_EXTRACTION_COOLDOWN = 30.0`）
+- ~~新增 per-wa-id 冷却机制~~ → 已移除，提取为后台副作用不阻塞对话，每条消息均可触发
 
 ### 5. 记忆反馈机制
 - **文件：** `wa_agent.py` `bump_session_memory_use_count`、`select_relevant_memories`、`proactive.py` `_bump_use_count`

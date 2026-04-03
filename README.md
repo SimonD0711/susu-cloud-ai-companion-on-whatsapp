@@ -277,7 +277,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 - Removed dead code `extract_live_search_question_memory`
 
 **Rate Limiting**
-- Per-wa-id cooldown (2 minutes) prevents extraction on every message
+- Extraction runs as background side-effect after reply — no blocking, every message triggers
 
 **Feedback Mechanism**
 - New `use_count` tracks memory reference count

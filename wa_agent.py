@@ -105,8 +105,7 @@ _read_scheduler_states = {}
 _read_scheduler_states_lock = threading.Lock()
 _last_memory_extraction = 0.0
 _MEMORY_EXTRACTION_COOLDOWN = 300.0  # 5 minutes
-_session_extraction_states = {}  # {wa_id: last_extraction_timestamp}
-_SESSION_EXTRACTION_COOLDOWN = 30.0  # 30 seconds between session extractions per contact
+
 
 WEATHER_QUERY_KEYWORDS = (
     "天氣", "天气", "weather", "氣溫", "气温", "幾度", "几度", "落雨", "落唔落雨",
@@ -5189,12 +5188,6 @@ def heuristic_extract_session_memories(incoming_text):
 
 
 def maybe_extract_session_memories(conn, wa_id, incoming_text):
-    global _session_extraction_states
-    now_ts = time.time()
-    last_ts = _session_extraction_states.get(wa_id, 0.0)
-    if now_ts - last_ts < _SESSION_EXTRACTION_COOLDOWN:
-        return []
-    _session_extraction_states[wa_id] = now_ts
     existing_rows = conn.execute(
         "SELECT content, bucket FROM wa_session_memories WHERE wa_id = ? LIMIT 30",
         (wa_id,),
