@@ -1001,6 +1001,278 @@ def maybe_update_user_location(conn, wa_id, text):
         pass
 
 
+_HK_HOLIDAYS_2026 = {
+    "2026-01-01": "元旦",
+    "2026-01-29": "農曆新年（正月初一）",
+    "2026-01-30": "農曆新年（初二）",
+    "2026-01-31": "農曆新年（初三）",
+    "2026-02-17": "農曆新年（初四）補假",
+    "2026-04-03": "清明節",
+    "2026-04-04": "清明節翌日 補假",
+    "2026-04-05": "耶穌受難節翌日",
+    "2026-04-06": "復活節翌日",
+    "2026-05-01": "勞動節",
+    "2026-05-07": "佛誕翌日 補假",
+    "2026-05-31": "端午節",
+    "2026-07-01": "香港回歸紀念日",
+    "2026-10-01": "國慶日",
+    "2026-10-07": "國慶節後首個工作日 補假",
+    "2026-10-26": "重陽節",
+    "2026-10-27": "重陽節後首個工作日 補假",
+    "2026-12-25": "聖誕節",
+    "2026-12-26": "聖誕節後首個周日",
+}
+
+_HK_HOLIDAYS_2027 = {
+    "2027-01-01": "元旦",
+    "2027-02-06": "農曆新年（正月初一）",
+    "2027-02-07": "農曆新年（初二）",
+    "2027-02-08": "農曆新年（初三）",
+    "2027-03-27": "耶穌受難節",
+    "2027-03-29": "復活節翌日",
+    "2027-04-05": "清明節",
+    "2027-05-01": "勞動節",
+    "2027-05-13": "佛誕",
+    "2027-07-01": "香港回歸紀念日",
+    "2027-09-16": "中秋節翌日",
+    "2027-10-08": "重陽節",
+    "2027-12-25": "聖誕節",
+    "2027-12-27": "聖誕節後首個工作日 補假",
+}
+
+_ALL_HK_HOLIDAYS = {**_HK_HOLIDAYS_2026, **_HK_HOLIDAYS_2027}
+
+
+def hk_today():
+    return datetime.now(timezone(timedelta(hours=8))).date()
+
+
+def get_today_holiday():
+    today_str = hk_today().isoformat()
+    return _ALL_HK_HOLIDAYS.get(today_str)
+
+
+def parse_ical_events(ical_text):
+    events = []
+    today = hk_today()
+    now_dt = datetime.now(timezone(timedelta(hours=8)))
+
+    vevent_blocks = re.split(r"(?=BEGIN:VEVENT)", ical_text)
+    for block in vevent_blocks:
+        if "BEGIN:VEVENT" not in block:
+            continue
+
+        summary = ""
+        m = re.search(r"^SUMMARY[^\n]*:\s*(.+)$", block, re.MULTILINE)
+        if m:
+            summary = m.group(1).strip()
+
+        dtstart_raw = None
+        m = re.search(r"^DTSTART[^:]*:\s*(.+)$", block, re.MULTILINE)
+        if m:
+            dtstart_raw = m.group(1).strip()
+
+        dtend_raw = None
+        m = re.search(r"^DTEND[^:]*:\s*(.+)$", block, re.MULTILINE)
+        if m:
+            dtend_raw = m.group(1).strip()
+
+        exdates = []
+        for m in re.finditer(r"^EXDATE[^:]*:\s*(.+)$", block, re.MULTILINE):
+            exdates.append(m.group(1).strip())
+
+        rrule_raw = None
+        m = re.search(r"^RRULE[^\n]*:\s*(.+)$", block, re.MULTILINE)
+        if m:
+            rrule_raw = m.group(1).strip()
+
+        def parse_dt(raw):
+            if not raw:
+                return None
+            raw = raw.strip()
+            if raw.startswith("VALUE=DATE:"):
+                d = raw.split(":", 1)[1]
+                return datetime(int(d[:4]), int(d[4:6]), int(d[6:8]), 0, 0, 0)
+            if raw.startswith("TZID="):
+                parts = raw.split(":", 1)
+                tz = parts[0].replace("TZID=", "")
+                val = parts[1]
+            else:
+                val = raw
+            val = val.replace("Z", "")
+            if len(val) == 8:
+                return datetime(int(val[:4]), int(val[4:6]), int(val[6:8]))
+            if len(val) >= 15:
+                return datetime(int(val[:4]), int(val[4:6]), int(val[6:8]), int(val[9:11]), int(val[11:13]), int(val[13:15]))
+            return None
+
+        start_dt = parse_dt(dtstart_raw)
+        if not start_dt:
+            continue
+
+        end_dt = parse_dt(dtend_raw) if dtend_raw else None
+
+        def is_excluded(dt):
+            for ex in exdates:
+                ex_dt = parse_dt(ex)
+                if ex_dt and ex_dt.date() == dt.date():
+                    return True
+            return False
+
+        def expand_rrule(start_dt):
+            if not rrule_raw:
+                return [start_dt]
+            params = dict(p.split("=", 1) for p in rrule_raw.split(";") if "=" in p)
+            freq = params.get("FREQ", "")
+            until_str = params.get("UNTIL", "")
+            byday = params.get("BYDAY", "")
+            if freq != "WEEKLY":
+                return [start_dt]
+            end = datetime(2099, 12, 31)
+            if until_str:
+                try:
+                    until_str = until_str.replace("Z", "")
+                    end = datetime(int(until_str[:4]), int(until_str[4:6]), int(until_str[6:8]))
+                except Exception:
+                    pass
+            day_map = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
+            target_wd = day_map.get(byday[:2], start_dt.weekday())
+            result = []
+            d = start_dt
+            while d <= end and d <= datetime(2099, 12, 31):
+                if d.weekday() == target_wd and d >= start_dt and not is_excluded(d):
+                    result.append(d)
+                d += timedelta(days=7)
+            return result if result else [start_dt]
+
+        dates = expand_rrule(start_dt)
+        for d in dates:
+            if d.date() < today or d.date() > today + timedelta(days=30):
+                continue
+            if is_excluded(d):
+                continue
+            time_str = ""
+            if d.hour or d.minute:
+                time_str = f"{d.hour:02d}:{d.minute:02d}"
+            events.append({
+                "date": d.date().isoformat(),
+                "time": time_str,
+                "summary": summary,
+                "end_dt": end_dt,
+            })
+    return events
+
+
+def get_calendar_events_cached(conn, wa_id):
+    ical_url = os.environ.get("WA_USER_ICAL_URL", "")
+    today_str = hk_today().isoformat()
+    cache_date_row = conn.execute(
+        "SELECT content, updated_at FROM wa_memories WHERE wa_id=? AND memory_key='calendar_cache_date' LIMIT 1",
+        (wa_id,),
+    ).fetchone()
+    if cache_date_row and cache_date_row["updated_at"] and cache_date_row["updated_at"].startswith(today_str):
+        events_row = conn.execute(
+            "SELECT content FROM wa_memories WHERE wa_id=? AND memory_key='calendar_cache_events' LIMIT 1",
+            (wa_id,),
+        ).fetchone()
+        if events_row and events_row["content"]:
+            try:
+                return json.loads(events_row["content"])
+            except Exception:
+                pass
+    if not ical_url:
+        return []
+    try:
+        req = Request(ical_url, headers={"User-Agent": "SusuCloud/1.0"})
+        with urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        events = parse_ical_events(raw)
+        events_json = json.dumps(events, ensure_ascii=False)
+        now = utc_now()
+        conn.execute(
+            "DELETE FROM wa_memories WHERE wa_id=? AND memory_key IN ('calendar_cache_date','calendar_cache_events')",
+            (wa_id,),
+        )
+        conn.execute(
+            "INSERT INTO wa_memories (wa_id,kind,memory_key,content,importance,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            (wa_id, "meta", "calendar_cache_date", today_str, 0, now, now),
+        )
+        conn.execute(
+            "INSERT INTO wa_memories (wa_id,kind,memory_key,content,importance,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            (wa_id, "meta", "calendar_cache_events", events_json, 0, now, now),
+        )
+        conn.commit()
+        return events
+    except Exception:
+        return []
+
+
+def detect_semester_period(events):
+    if not events:
+        return None
+    today = hk_today()
+    today_str = today.isoformat()
+    today_events = [e for e in events if e.get("date") == today_str]
+
+    has_exam = any(
+        re.search(r"(exam|考試|final|midterm|期中考試|期末)", e.get("summary", ""), re.I)
+        for e in today_events
+    )
+    if has_exam:
+        return "學期考試週"
+    has_class = any(
+        re.search(r"(MNE|MA|GE|PHY|LC|CS|EE)[0-9]", e.get("summary", ""), re.I)
+        for e in today_events
+    )
+    if has_class:
+        return "學期中"
+
+    event_dates = sorted(set(e.get("date") for e in events))
+    if len(event_dates) >= 2:
+        gaps = []
+        for i in range(1, len(event_dates)):
+            d1 = datetime.strptime(event_dates[i - 1], "%Y-%m-%d").date()
+            d2 = datetime.strptime(event_dates[i], "%Y-%m-%d").date()
+            gaps.append((d2 - d1).days)
+        if gaps and max(gaps) >= 2:
+            return "假期中"
+    return "學期中"
+
+
+def format_calendar_block(events, label, max_days, time_style):
+    if not events:
+        return None
+    today = hk_today()
+    cutoff = today + timedelta(days=max_days)
+    relevant = []
+    for e in events:
+        try:
+            ed = datetime.strptime(e["date"], "%Y-%m-%d").date()
+            if today <= ed <= cutoff:
+                relevant.append((ed, e))
+        except Exception:
+            pass
+    if not relevant:
+        return None
+    lines = []
+    for ed, e in sorted(relevant):
+        weekday_cn = ["一", "二", "三", "四", "五", "六", "日"][ed.weekday()]
+        if ed == today:
+            date_str = "今日"
+        elif ed == today + timedelta(days=1):
+            date_str = "明日"
+        elif ed == today + timedelta(days=2):
+            date_str = "後日"
+        else:
+            date_str = f"{ed.month}/{ed.day}（{weekday_cn}）"
+        time_str = e.get("time", "")
+        summary = e.get("summary", "（無標題）")
+        if time_str:
+            lines.append(f"  📅 {date_str} {time_str} {summary}")
+        else:
+            lines.append(f"  📅 {date_str} {summary}")
+    return f"{label}：\n" + "\n".join(lines)
+
 
 def detect_weather_source(text):
     if not text:
@@ -5860,6 +6132,9 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
     core_profile_block = build_core_profile_memory_text(primary_text) if primary_text else ""
     raw_location = get_current_location(conn, wa_id) if conn else None
     current_location = format_location_with_context(raw_location)
+    calendar_events = get_calendar_events_cached(conn, wa_id) if conn else []
+    today_holiday = get_today_holiday()
+    semester_period = detect_semester_period(calendar_events)
     memory_block = {
         "primary_profile": core_profile_block,
         "long_term": selected["selected_long_term"],
@@ -5868,6 +6143,9 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
         "within_7d": short_groups.get("within_7d", []),
         "archive": archive_lines,
         "current_location": current_location,
+        "calendar_events": calendar_events,
+        "today_holiday": today_holiday,
+        "semester_period": semester_period,
     }
     return {
         "profile_name": profile_name,
@@ -5984,6 +6262,16 @@ def build_structured_context_from_runtime_context(runtime_context):
         system_parts.append("Core profile:\n" + memory_block["primary_profile"])
     if memory_block.get("current_location"):
         system_parts.append("User's known location: " + memory_block["current_location"])
+    if memory_block.get("semester_period"):
+        system_parts.append("學期狀態：" + memory_block["semester_period"])
+    if memory_block.get("today_holiday"):
+        system_parts.append("今日公眾假期：" + memory_block["today_holiday"])
+    today_block = format_calendar_block(memory_block.get("calendar_events", []), "今日日程", 0, runtime_context.get("time_style", ""))
+    if today_block:
+        system_parts.append(today_block)
+    upcoming_block = format_calendar_block(memory_block.get("calendar_events", []), "未來日程（7天）", 7, runtime_context.get("time_style", ""))
+    if upcoming_block:
+        system_parts.append(upcoming_block)
     system_parts.append("Relevant long-term memories:\n" + ("\n".join(memory_block["long_term"]) if memory_block["long_term"] else "(none)"))
     system_parts.append("Relevant recent memories within 24h:\n" + ("\n".join(memory_block["within_24h"]) if memory_block["within_24h"] else "(none)"))
     system_parts.append("Relevant recent memories within 3d:\n" + ("\n".join(memory_block["within_3d"]) if memory_block["within_3d"] else "(none)"))
