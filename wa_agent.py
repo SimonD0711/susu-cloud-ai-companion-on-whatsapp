@@ -106,7 +106,7 @@ _read_scheduler_states_lock = threading.Lock()
 _last_memory_extraction = 0.0
 _MEMORY_EXTRACTION_COOLDOWN = 300.0  # 5 minutes
 _session_extraction_states = {}  # {wa_id: last_extraction_timestamp}
-_SESSION_EXTRACTION_COOLDOWN = 120.0  # 2 minutes between session extractions per contact
+_SESSION_EXTRACTION_COOLDOWN = 30.0  # 30 seconds between session extractions per contact
 
 WEATHER_QUERY_KEYWORDS = (
     "天氣", "天气", "weather", "氣溫", "气温", "幾度", "几度", "落雨", "落唔落雨",
