@@ -467,6 +467,7 @@
       padding: 10px 16px;
       font-size: 14px; line-height: 1.75;
       color: var(--text); position: relative;
+      white-space: pre-wrap;
     }
     .entry-excerpt.truncated { cursor: pointer; }
     .excerpt-toggle-btn {
@@ -476,6 +477,54 @@
       display: inline-block;
     }
     .excerpt-toggle-btn:hover { text-decoration: underline; }
+
+    .session-lines {
+      padding: 10px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .session-line {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #fff;
+    }
+    .session-line-text {
+      white-space: pre-wrap;
+      line-height: 1.6;
+      flex: 1;
+      font-size: 14px;
+    }
+    .session-line-actions {
+      display: inline-flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .session-line-btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 3px 6px;
+    }
+    .session-line-add-wrap {
+      padding: 0 16px 10px;
+    }
+    .session-line-add-btn {
+      border: 1px dashed var(--line);
+      background: #fff;
+      color: var(--accent);
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 13px;
+    }
 
     .entry-footer {
       padding: 8px 16px 12px;
@@ -966,7 +1015,7 @@
     document.getElementById('stat-contact-sub').textContent = c ? c.wa_id : '未選擇';
     document.getElementById('stat-long').textContent = String(stats.long_term_count || 0);
     document.getElementById('stat-session').textContent = String(stats.session_count || 0);
-    document.getElementById('stat-session-sub').textContent = `${stats.active_session_count || 0} 條有效 · 24h ${stats.recent_24h_count || 0} / 3d ${stats.recent_3d_count || 0} / 1w ${stats.recent_7d_count || 0}`;
+    document.getElementById('stat-session-sub').textContent = `${stats.active_session_count || 0} 條有效 · 24h ${stats.recent_24h_count || 0} / 3d ${stats.recent_3d_count || 0} / 1w ${stats.recent_7d_count || 0} / 日誌 ${stats.daily_log_count || 0}`;
     document.getElementById('stat-archive').textContent = String(stats.archive_count || 0);
     document.getElementById('stat-archive-sub').textContent = `${stats.archive_count || 0} 條已歸檔 · 7 天後永久保留`;
     document.getElementById('stat-reminder').textContent = String(stats.reminder_count || 0);
@@ -983,6 +1032,93 @@
   }
 
   const EXCERPT_LEN = 150;
+
+  function formatSessionLogContent(raw, item) {
+    const text = String(raw ?? '');
+    if (!item || (item.bucket !== 'daily_log' && item.memory_key && !String(item.memory_key).startsWith('daily:'))) {
+      return text;
+    }
+    return text.replace(/。\s*(?=\d{1,2}:\d{2}\s)/g, '。\n');
+  }
+
+  function splitSessionLogLines(raw) {
+    return String(raw || '')
+      .split('。')
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+
+  function parseSessionLine(line) {
+    const m = String(line || '').match(/^(\d{1,2}:\d{2})\s+(.+)$/);
+    if (!m) return { time: '', text: String(line || '') };
+    return { time: m[1], text: m[2] };
+  }
+
+  window._slAdd = async function(id) {
+    const time = prompt('請輸入時間（HH:MM）', new Date().toTimeString().slice(0,5));
+    if (time === null) return;
+    const text = prompt('請輸入記憶內容');
+    if (text === null) return;
+    try {
+      await apiFetch('/memory/session-line/add', {
+        method: 'POST',
+        body: JSON.stringify({ id, time: time.trim(), text: text.trim() }),
+      });
+      await loadMemory();
+    } catch (e) { alert('新增失敗：' + e.message); }
+  };
+
+  window._slEdit = async function(id, lineIndex) {
+    const cards = document.querySelectorAll('.entry-card');
+    let targetCard = null;
+    for (const card of cards) {
+      if (Number(card.dataset.entryId) === id) { targetCard = card; break; }
+    }
+    const lineText = targetCard?.querySelectorAll('.session-line-text')[lineIndex]?.textContent || '';
+    const parsed = parseSessionLine(lineText);
+    const nextTime = prompt('請修改時間（HH:MM）', parsed.time || new Date().toTimeString().slice(0,5));
+    if (nextTime === null) return;
+    const nextText = prompt('請修改內容', parsed.text || '');
+    if (nextText === null) return;
+    try {
+      await apiFetch('/memory/session-line/update', {
+        method: 'POST',
+        body: JSON.stringify({ id, line_index: lineIndex, time: nextTime.trim(), text: nextText.trim() }),
+      });
+      await loadMemory();
+    } catch (e) { alert('修改失敗：' + e.message); }
+  };
+
+  window._slDel = async function(id, lineIndex) {
+    if (!confirm('確定刪除這一行記憶？')) return;
+    try {
+      await apiFetch('/memory/session-line/delete', {
+        method: 'POST',
+        body: JSON.stringify({ id, line_index: lineIndex }),
+      });
+      await loadMemory();
+    } catch (e) { alert('刪除失敗：' + e.message); }
+  };
+
+  function renderSessionContent(item, term) {
+    const isDaily = item && ((item.bucket === 'daily_log') || String(item.memory_key || '').startsWith('daily:'));
+    if (!isDaily) {
+      return excerptHtml(item.content, term);
+    }
+    const lines = splitSessionLogLines(item.content);
+    const linesHtml = lines.map((line, idx) => {
+      const safe = hl(esc(line), term);
+      return `<div class="session-line">
+        <div class="session-line-text">${safe}</div>
+        <div class="session-line-actions">
+          <button class="session-line-btn" onclick="window._slEdit(${item.id},${idx})" title="編輯這行">✏️</button>
+          <button class="session-line-btn" onclick="window._slDel(${item.id},${idx})" title="刪除這行">🗑️</button>
+        </div>
+      </div>`;
+    }).join('');
+    const addBtn = `<button class="session-line-add-btn session-line-add" data-id="${item.id}" onclick="window._slAdd(${item.id})">+ 新增一行</button>`;
+    return `<div class="session-lines">${linesHtml || '<div class="entry-excerpt">（暫無內容）</div>'}<div class="session-line-add-wrap">${addBtn}</div></div>`;
+  }
 
   function excerptHtml(raw, term) {
     const plain = String(raw ?? '');
@@ -1056,7 +1192,7 @@
 
     if (activeTab === 'session') {
       return `
-<div class="entry-card">
+<div class="entry-card" data-entry-id="${item.id}">
   <div class="entry-topbar">
     <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="session">
     <div class="entry-meta-row">
@@ -1070,7 +1206,7 @@
     </div>
   </div>
   <hr class="entry-divider">
-  ${excerptHtml(item.content, term)}
+  ${renderSessionContent(item, term)}
   <div class="entry-footer">
     <span class="entry-time">發生 ${fmt(item.observed_at || item.updated_at)}</span>
     <span class="entry-time ${expCls}">到期 ${fmt(item.expires_at)}</span>
@@ -1080,7 +1216,7 @@
 
     if (activeTab === 'archive') {
       return `
-<div class="entry-card">
+<div class="entry-card" data-entry-id="${item.id}">
   <div class="entry-topbar">
     <input type="checkbox" class="batch-checkbox" data-id="${item.id}" data-tab="archive">
     <div class="entry-meta-row">
@@ -1198,6 +1334,7 @@
           await loadMemory();
         } catch (e) { alert('續期失敗：' + e.message); }
       }));
+  }
     document.querySelectorAll('.promote-btn').forEach(btn =>
       btn.addEventListener('click', async () => {
         if (!confirm('確定要將這條歸檔記憶提升為長期記憶嗎？')) return;

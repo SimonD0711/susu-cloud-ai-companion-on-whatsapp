@@ -1,5 +1,9 @@
 """Tests for src.wa_agent.memory."""
 
+import importlib.util
+import sqlite3
+from pathlib import Path
+
 import pytest
 
 from src.wa_agent.memory import (
@@ -148,3 +152,122 @@ def test_memory_manager_has_extract_methods():
     assert hasattr(MemoryManager, "normalize_bucket")
     assert hasattr(MemoryManager, "classify_bucket")
     assert hasattr(MemoryManager, "infer_observed_at")
+
+
+def _load_root_wa_agent_module():
+    module_path = Path(__file__).resolve().parents[2] / "wa_agent.py"
+    spec = importlib.util.spec_from_file_location("root_wa_agent", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_should_trigger_session_extraction_uses_five_rounds(monkeypatch):
+    wa_agent = _load_root_wa_agent_module()
+
+    wa_agent._session_extraction_state.clear()
+    monkeypatch.setattr(wa_agent.time, "time", lambda: 1000.0)
+
+    results = [wa_agent._should_trigger_session_extraction("85260000000") for _ in range(5)]
+
+    assert results == [False, False, False, False, False]
+    assert wa_agent._should_trigger_session_extraction("85260000000") is True
+
+
+def test_should_trigger_session_extraction_uses_thirty_minutes(monkeypatch):
+    wa_agent = _load_root_wa_agent_module()
+
+    wa_agent._session_extraction_state.clear()
+    wa_agent._session_extraction_state["85260000000"] = {"turns": 1, "last_at": 1000.0}
+    monkeypatch.setattr(wa_agent.time, "time", lambda: 2801.0)
+
+    assert wa_agent._should_trigger_session_extraction("85260000000") is True
+
+
+def test_maybe_extract_session_memories_fallback_writes_daily_log(monkeypatch):
+    wa_agent = _load_root_wa_agent_module()
+    from src.wa_agent.db import MemoryDB
+
+    db = MemoryDB(":memory:")
+    conn = db.init_db()
+    conn.row_factory = sqlite3.Row
+
+    monkeypatch.setattr(wa_agent, "generate_model_text", lambda *args, **kwargs: "[]")
+    monkeypatch.setattr(
+        wa_agent,
+        "heuristic_extract_session_memories",
+        lambda text: [{"content": "尋晚去咗睇戲", "observed_at": None}],
+    )
+    monkeypatch.setattr(wa_agent, "promote_to_long_term", lambda *args, **kwargs: None)
+    monkeypatch.setattr(wa_agent, "hk_today", lambda: wa_agent.datetime(2026, 4, 3, tzinfo=wa_agent.HK_TZ).date())
+    monkeypatch.setattr(wa_agent, "hk_now", lambda: wa_agent.datetime.fromisoformat("2026-04-03T12:34:00+08:00"))
+
+    saved = wa_agent.maybe_extract_session_memories(conn, "85260000000", "尋晚去咗睇戲")
+    row = conn.execute(
+        "SELECT bucket, memory_key, content FROM wa_session_memories WHERE wa_id = ?",
+        ("85260000000",),
+    ).fetchone()
+
+    assert saved == ["尋晚去咗睇戲"]
+    assert row is not None
+    assert row["bucket"] == "daily_log"
+    assert row["memory_key"] == "daily:2026-04-02"
+    assert "12:34 尋晚去咗睇戲" in row["content"]
+
+
+def test_daily_log_backfill_target_date_runs_once_per_day():
+    wa_agent = _load_root_wa_agent_module()
+
+    now = wa_agent.datetime.fromisoformat("2026-04-05T03:59:10+08:00")
+    assert wa_agent.daily_log_backfill_target_date(now) == "2026-04-04"
+
+    wa_agent._daily_log_backfill_state["last_target_date"] = "2026-04-04"
+    assert wa_agent.run_daily_log_backfill_once(now)["status"] == "already_ran"
+
+
+def test_backfill_daily_log_for_date_when_logs_are_sparse(monkeypatch):
+    wa_agent = _load_root_wa_agent_module()
+    from src.wa_agent.db import MemoryDB
+
+    db = MemoryDB(":memory:")
+    conn = db.init_db()
+    conn.row_factory = sqlite3.Row
+    wa_id = "85260000000"
+
+    rows = [
+        (wa_id, "inbound", "m1", "text", "今日返學好攰", "{}", "2026-04-04T09:00:00+08:00"),
+        (wa_id, "outbound", "m2", "text", "你仲頂得順嗎", "{}", "2026-04-04T09:01:00+08:00"),
+        (wa_id, "inbound", "m3", "text", "啱啱上完堂", "{}", "2026-04-04T11:00:00+08:00"),
+        (wa_id, "inbound", "m4", "text", "今晚要趕project", "{}", "2026-04-04T14:00:00+08:00"),
+        (wa_id, "inbound", "m5", "text", "可能要通頂", "{}", "2026-04-04T18:00:00+08:00"),
+        (wa_id, "inbound", "m6", "text", "啱啱食完飯返到宿舍", "{}", "2026-04-04T21:00:00+08:00"),
+        (wa_id, "inbound", "m7", "text", "聽日朝早仲要開會", "{}", "2026-04-05T01:00:00+08:00"),
+    ]
+    conn.executemany(
+        "INSERT INTO wa_messages (wa_id, direction, message_id, message_type, body, raw_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    wa_agent.upsert_daily_log(conn, wa_id, "2026-04-04", "今日返學好攰", logged_at="09:05")
+    conn.commit()
+
+    monkeypatch.setattr(
+        wa_agent,
+        "generate_model_text",
+        lambda *args, **kwargs: '[{"content":"今晚要趕project","observed_at":"2026-04-04"},{"content":"啱啱食完飯返到宿舍","observed_at":"2026-04-04"}]',
+    )
+    monkeypatch.setattr(wa_agent, "promote_to_long_term", lambda *args, **kwargs: None)
+    monkeypatch.setattr(wa_agent, "hk_now", lambda: wa_agent.datetime.fromisoformat("2026-04-05T03:59:00+08:00"))
+
+    result = wa_agent.backfill_daily_log_for_date(conn, wa_id, "2026-04-04")
+    row = conn.execute(
+        "SELECT content FROM wa_session_memories WHERE wa_id = ? AND memory_key = ?",
+        (wa_id, "daily:2026-04-04"),
+    ).fetchone()
+
+    assert result["reason"] == "backfilled"
+    assert result["saved"] == ["今晚要趕project", "啱啱食完飯返到宿舍"]
+    assert row is not None
+    assert "09:05 今日返學好攰" in row["content"]
+    assert "03:59 今晚要趕project" in row["content"]
+    assert "03:59 啱啱食完飯返到宿舍" in row["content"]

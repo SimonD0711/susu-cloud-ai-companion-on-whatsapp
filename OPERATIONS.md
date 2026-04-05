@@ -456,7 +456,7 @@ SELECT id, direction, body, created_at FROM wa_messages ORDER BY id DESC LIMIT 1
 ### 2026-04-04 改动
 
 #### 1. LLM Provider 切换为 OpenRouter
-- **变更：** Relay API Key 从 `[REDACTED]` 改为 `[REDACTED]`
+- **变更：** Relay API Key 从旧 relay key 改为 OpenRouter key（均已脱敏，不在文档中记录明文）
 - **Base URL：** 从 `https://apiapipp.com/v1` 改为 `https://openrouter.ai/api/v1`
 - **模型：** 改用 OpenRouter 格式 ID
   - Primary：`claude-opus-4-6` → `anthropic/claude-opus-4.6`
@@ -640,7 +640,7 @@ SELECT id, direction, body, created_at FROM wa_messages ORDER BY id DESC LIMIT 1
 
 ### Cloudflare 相关后台
 
-- **Account ID：** `e8cadaaa1111961b152d822ea5bdbfd8`
+- **Account ID：** 已脱敏，现场以 Cloudflare Dashboard 或 `/etc/wa-agent.env` 为准
 - **Gateway：** `default`
 - **用途：** Anthropic native `/messages` 搜索链路
 - **注意：** Cloudflare `compat/chat/completions` 的 Anthropic 模型名映射不稳定；生产搜索链路固定走 Anthropic native `/anthropic/v1/messages`
@@ -707,7 +707,7 @@ sqlite3 /var/www/html/wa_agent.db "SELECT 1;"
 | 用户 | Simon（通过 WhatsApp 联系苏苏）|
 | 苏苏号码 | 85259576670 |
 | 管理员号码 | 8196853612 |
-| 服务器 | Tokyo VPS (103.147.185.18) |
+| 服务器 | Tokyo VPS（公网 IP 已脱敏，现场以 SSH 配置或服务商控制台为准） |
 | 本地开发 | Lenovo 笔记本 |
 | Cloudflare Worker | `https://relay-proxy.simonding711.workers.dev` | Whisper 路由 |
 | Google Calendar iCal | `simonding711@gmail.com` 私人日历（WA_USER_ICAL_URL）|

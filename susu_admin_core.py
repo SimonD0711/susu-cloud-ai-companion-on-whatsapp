@@ -8,6 +8,12 @@ from pathlib import Path
 
 
 BASE_DIR = Path(os.environ.get("SUSU_BASE_DIR", "/var/www/html"))
+
+try:
+    from zoneinfo import ZoneInfo
+    HK_TZ = ZoneInfo("Asia/Hong_Kong")
+except Exception:
+    HK_TZ = timezone(timedelta(hours=8))
 WA_AGENT_DB_PATH = BASE_DIR / "wa_agent.db"
 SUSU_PRIMARY_WA_ID = os.environ.get("WA_ADMIN_WA_ID", "85259576670")
 SUSU_SETTINGS_TABLE = "wa_susu_settings"
@@ -19,6 +25,7 @@ SESSION_BUCKET_LABELS = {
     "today": "24小時內",
     "last_night": "三天內",
     "recent_days": "一週內",
+    "daily_log": "每日日誌",
 }
 SUSU_SETTING_SPECS = {
     "system_persona": {"type": "multiline", "max_length": 12000, "default": "", "required": True},
@@ -35,7 +42,7 @@ SUSU_SETTING_SPECS = {
 
 
 def utc_now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(HK_TZ).isoformat()
 
 
 def get_wa_agent_db():
@@ -69,8 +76,8 @@ def parse_iso_text(value):
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+            parsed = parsed.replace(tzinfo=HK_TZ)
+        return parsed
     except Exception:
         return None
 
@@ -79,7 +86,7 @@ def current_session_bucket(observed_at, now_utc=None):
     observed = parse_iso_text(observed_at)
     if not observed:
         return "within_7d"
-    now_utc = now_utc or datetime.now(timezone.utc)
+    now_utc = now_utc or datetime.now(HK_TZ)
     age = now_utc - observed
     if age <= timedelta(hours=24):
         return "within_24h"
@@ -371,7 +378,7 @@ def fetch_susu_memory(selected_wa_id=""):
                     (selected_wa_id,),
                 ).fetchall()
             ]
-            now_utc = datetime.now(timezone.utc)
+            now_utc = datetime.now(HK_TZ)
             session_memories = []
             for row in conn.execute(
                 """
@@ -384,14 +391,15 @@ def fetch_susu_memory(selected_wa_id=""):
             ).fetchall():
                 expires_at = parse_iso_text(row["expires_at"])
                 observed_at = row["observed_at"] or row["updated_at"] or ""
-                current_bucket = current_session_bucket(observed_at, now_utc)
+                stored_bucket = row["bucket"] or "within_7d"
+                effective_bucket = stored_bucket if stored_bucket == "daily_log" else (current_session_bucket(observed_at, now_utc) or stored_bucket)
                 session_memories.append(
                     {
                         "id": row["id"],
                         "wa_id": row["wa_id"],
-                        "bucket": current_bucket or (row["bucket"] or "within_7d"),
-                        "bucket_label": SESSION_BUCKET_LABELS.get(current_bucket or (row["bucket"] or "within_7d"), current_bucket or (row["bucket"] or "within_7d")),
-                        "source_bucket": row["bucket"] or "within_7d",
+                        "bucket": effective_bucket,
+                        "bucket_label": SESSION_BUCKET_LABELS.get(effective_bucket, effective_bucket),
+                        "source_bucket": stored_bucket,
                         "content": row["content"] or "",
                         "memory_key": row["memory_key"] or "",
                         "observed_at": observed_at,
@@ -448,7 +456,7 @@ def fetch_susu_memory(selected_wa_id=""):
 
         def _count_session_new_this_week(session_list, now=None):
             if now is None:
-                now = datetime.now(timezone.utc)
+                now = datetime.now(HK_TZ)
             week_ago = now - timedelta(days=7)
             return sum(
                 1 for item in session_list
@@ -478,6 +486,7 @@ def fetch_susu_memory(selected_wa_id=""):
                 "recent_24h_count": sum(1 for item in session_memories if item["bucket"] == "within_24h" and not item["is_expired"]),
                 "recent_3d_count": sum(1 for item in session_memories if item["bucket"] == "within_3d" and not item["is_expired"]),
                 "recent_7d_count": sum(1 for item in session_memories if item["bucket"] == "within_7d" and not item["is_expired"]),
+                "daily_log_count": sum(1 for item in session_memories if item["bucket"] == "daily_log" and not item["is_expired"]),
                 "archive_count": len(archived_memories),
                 "reminder_count": len(reminders),
                 "pending_reminder_count": sum(1 for item in reminders if not item["fired"]),
@@ -620,13 +629,151 @@ def renew_session_memory(entry_id, days=7):
     conn = get_wa_agent_db()
     try:
         now = utc_now()
-        new_expires = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+        new_expires = (datetime.now(HK_TZ) + timedelta(days=days)).isoformat()
         result = conn.execute(
             "UPDATE wa_session_memories SET expires_at = ?, updated_at = ? WHERE id = ?",
             (new_expires, now, entry_id),
         )
         conn.commit()
         return {"ok": result.rowcount > 0, "expires_at": new_expires}
+    finally:
+        conn.close()
+
+
+def _normalize_hhmm(value):
+    text = str(value or "").strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})$", text)
+    if not m:
+        return ""
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+        return ""
+    return f"{hh:02d}:{mm:02d}"
+
+
+def _split_daily_log_lines(content):
+    lines = []
+    for raw in str(content or "").split("。"):
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^(\d{1,2}:\d{2})\s+(.+)$", line)
+        if m:
+            hhmm = _normalize_hhmm(m.group(1))
+            text = susu_clean_text(m.group(2))
+            if hhmm and text:
+                lines.append((hhmm, text))
+        else:
+            text = susu_clean_text(line)
+            if text:
+                lines.append(("99:99", text))
+    return lines
+
+
+def _join_daily_log_lines(lines):
+    norm = []
+    seen = set()
+    for hhmm, text in lines:
+        n_hhmm = _normalize_hhmm(hhmm) if hhmm != "99:99" else "99:99"
+        n_text = susu_clean_text(text)
+        if not n_text:
+            continue
+        key = f"{n_hhmm}|{n_text}"
+        if key in seen:
+            continue
+        seen.add(key)
+        norm.append((n_hhmm, n_text))
+    norm.sort(key=lambda x: (x[0], x[1]))
+    parts = [f"{hhmm} {text}" if hhmm != "99:99" else text for hhmm, text in norm]
+    return "。".join(parts)
+
+
+def _get_daily_row(conn, entry_id):
+    row = conn.execute(
+        "SELECT id, bucket, memory_key, content FROM wa_session_memories WHERE id = ?",
+        (entry_id,),
+    ).fetchone()
+    if not row:
+        return None, {"ok": False, "detail": "Session memory not found"}
+    is_daily = (row["bucket"] == "daily_log") or str(row["memory_key"] or "").startswith("daily:")
+    if not is_daily:
+        return None, {"ok": False, "detail": "Only daily_log supports line editing"}
+    return row, None
+
+
+def add_session_log_line(entry_id, hhmm, text):
+    entry_id = int(entry_id or 0)
+    hhmm = _normalize_hhmm(hhmm)
+    text = susu_clean_text(text)
+    if not entry_id or not hhmm or not text:
+        return {"ok": False, "detail": "Missing id, time or text"}
+    conn = get_wa_agent_db()
+    try:
+        row, err = _get_daily_row(conn, entry_id)
+        if err:
+            return err
+        lines = _split_daily_log_lines(row["content"])
+        lines.append((hhmm, text))
+        new_content = _join_daily_log_lines(lines)
+        conn.execute(
+            "UPDATE wa_session_memories SET content = ?, updated_at = ? WHERE id = ?",
+            (new_content, utc_now(), entry_id),
+        )
+        conn.commit()
+        return {"ok": True, "id": entry_id, "content": new_content}
+    finally:
+        conn.close()
+
+
+def update_session_log_line(entry_id, line_index, hhmm, text):
+    entry_id = int(entry_id or 0)
+    line_index = int(line_index or -1)
+    hhmm = _normalize_hhmm(hhmm)
+    text = susu_clean_text(text)
+    if not entry_id or line_index < 0 or not hhmm or not text:
+        return {"ok": False, "detail": "Missing id, line_index, time or text"}
+    conn = get_wa_agent_db()
+    try:
+        row, err = _get_daily_row(conn, entry_id)
+        if err:
+            return err
+        lines = _split_daily_log_lines(row["content"])
+        if line_index >= len(lines):
+            return {"ok": False, "detail": "line_index out of range"}
+        lines[line_index] = (hhmm, text)
+        new_content = _join_daily_log_lines(lines)
+        conn.execute(
+            "UPDATE wa_session_memories SET content = ?, updated_at = ? WHERE id = ?",
+            (new_content, utc_now(), entry_id),
+        )
+        conn.commit()
+        return {"ok": True, "id": entry_id, "content": new_content}
+    finally:
+        conn.close()
+
+
+def delete_session_log_line(entry_id, line_index):
+    entry_id = int(entry_id or 0)
+    line_index = int(line_index or -1)
+    if not entry_id or line_index < 0:
+        return {"ok": False, "detail": "Missing id or line_index"}
+    conn = get_wa_agent_db()
+    try:
+        row, err = _get_daily_row(conn, entry_id)
+        if err:
+            return err
+        lines = _split_daily_log_lines(row["content"])
+        if line_index >= len(lines):
+            return {"ok": False, "detail": "line_index out of range"}
+        del lines[line_index]
+        new_content = _join_daily_log_lines(lines)
+        conn.execute(
+            "UPDATE wa_session_memories SET content = ?, updated_at = ? WHERE id = ?",
+            (new_content, utc_now(), entry_id),
+        )
+        conn.commit()
+        return {"ok": True, "id": entry_id, "content": new_content}
     finally:
         conn.close()
 

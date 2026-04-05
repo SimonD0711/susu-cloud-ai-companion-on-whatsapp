@@ -17,13 +17,19 @@ sys.path.insert(0, str(PathType(__file__).parent.parent.parent))
 SUSU_SETTINGS_TABLE = "wa_susu_settings"
 SHORT_TERM_MEMORY_RETENTION_HOURS = 168
 
+try:
+    from zoneinfo import ZoneInfo
+    HK_TZ = ZoneInfo("Asia/Hong_Kong")
+except Exception:
+    HK_TZ = timezone(timedelta(hours=8))
+
 
 def utc_now():
-    return datetime.now(timezone.utc)
+    return datetime.now(HK_TZ)
 
 
 def hk_now():
-    return datetime.now(timezone.utc).astimezone()
+    return datetime.now(HK_TZ)
 
 
 def _normalize_key(text: str) -> str:
@@ -44,7 +50,7 @@ def _normalize_bucket(bucket: str) -> str:
 
 
 def _short_term_expiry(observed_text: str) -> datetime:
-    return datetime.now(timezone.utc) + timedelta(hours=SHORT_TERM_MEMORY_RETENTION_HOURS)
+    return datetime.now(HK_TZ) + timedelta(hours=SHORT_TERM_MEMORY_RETENTION_HOURS)
 
 
 def _clean_text(text: str) -> str:
@@ -292,9 +298,9 @@ class MemoryDB:
         ).fetchall()
         for row in rows:
             bucket = _normalize_bucket(row["bucket"])
-            now = datetime.now(timezone.utc)
+            now = hk_now()
             observed = self._parse_iso_dt(row["observed_at"] or row["updated_at"]) or now
-            observed_text = observed.astimezone(timezone.utc).isoformat()
+            observed_text = observed.isoformat()
             expires_text = _short_term_expiry(observed_text).isoformat()
             scoped_key = f"{bucket}:{_normalize_key(row['content'])}"
             if (
@@ -309,10 +315,10 @@ class MemoryDB:
                 )
 
     def _archive_expired_session_memories(self, conn: sqlite3.Connection, now=None):
-        now_utc = (now or hk_now()).astimezone(timezone.utc)
+        now_hk = now or hk_now()
         rows = conn.execute(
             "SELECT id, wa_id, content, memory_key, bucket, observed_at, updated_at, expires_at FROM wa_session_memories WHERE expires_at != '' AND expires_at <= ? ORDER BY observed_at ASC, id ASC",
-            (now_utc.isoformat(),),
+            (now_hk.isoformat(),),
         ).fetchall()
         for row in rows:
             content = _clean_text(row["content"])
@@ -320,10 +326,10 @@ class MemoryDB:
             if not content or not archive_key:
                 conn.execute("DELETE FROM wa_session_memories WHERE id=?", (row["id"],))
                 continue
-            observed = self._parse_iso_dt(row["observed_at"] or row["updated_at"]) or now_utc
-            observed_text = observed.astimezone(timezone.utc).isoformat()
+            observed = self._parse_iso_dt(row["observed_at"] or row["updated_at"]) or now_hk
+            observed_text = observed.isoformat()
             updated_text = _clean_text(row["updated_at"]) or observed_text
-            archived_at = datetime.now(timezone.utc).isoformat()
+            archived_at = hk_now().isoformat()
             conn.execute(
                 """
                 INSERT INTO wa_memory_archive (wa_id, content, memory_key, source_bucket, observed_at, updated_at, archived_at)
@@ -403,13 +409,13 @@ class MemoryDB:
         if not key:
             return False
         bucket = _normalize_bucket(bucket)
-        now = datetime.now(timezone.utc)
+        now = hk_now()
         observed = self._parse_iso_dt(observed_at) or now
         if ttl_hours is None:
             ttl_hours = SHORT_TERM_MEMORY_RETENTION_HOURS
         scoped_key = f"{bucket}:{key}"
-        expires_at = (observed.astimezone(timezone.utc) + timedelta(hours=ttl_hours)).isoformat()
-        observed_at_text = observed.astimezone(timezone.utc).isoformat()
+        expires_at = (observed + timedelta(hours=ttl_hours)).isoformat()
+        observed_at_text = observed.isoformat()
         now_text = now.isoformat()
         self.execute(
             """

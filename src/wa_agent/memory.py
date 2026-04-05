@@ -8,6 +8,12 @@ from typing import Optional
 
 from src.ai.config import AIConfig
 
+try:
+    from zoneinfo import ZoneInfo
+    HK_TZ = ZoneInfo("Asia/Hong_Kong")
+except Exception:
+    HK_TZ = timezone(timedelta(hours=8))
+
 
 MEMORY_EXTRACTOR_PROMPT = """你係一個精確嘅記憶管理助手。每次你會睇到對方嘅現有記憶，以及佢哋最新嘅說話。你要判斷有冇新嘅穩定長期資訊係值得記錄低嘅。
 
@@ -121,7 +127,7 @@ def infer_observed_at_from_text(text: str, now: Optional[datetime] = None) -> Op
     value = clean_text(text)
     if not value:
         return None
-    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    now_hk = now or datetime.now(HK_TZ)
     shift_days = 0
 
     PAST_MARKERS = {
@@ -151,7 +157,7 @@ def infer_observed_at_from_text(text: str, now: Optional[datetime] = None) -> Op
     if shift_days == 0:
         return None
 
-    return (now_utc - timedelta(days=shift_days)).astimezone(timezone.utc)
+    return (now_hk - timedelta(days=shift_days))
 
 
 class MemoryManager:

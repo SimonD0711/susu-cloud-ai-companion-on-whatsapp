@@ -10,12 +10,15 @@ from urllib.parse import parse_qs, urlparse
 
 from susu_admin_core import (
     SUSU_PRIMARY_WA_ID,
+    add_session_log_line,
     create_susu_memory,
     dedupe_primary_long_term_memories,
+    delete_session_log_line,
     delete_susu_memory,
     fetch_susu_memory,
     promote_archive_memory,
     renew_session_memory,
+    update_session_log_line,
     update_susu_memory,
     update_susu_reminder,
     update_susu_settings,
@@ -287,6 +290,48 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 result = promote_archive_memory(entry_id)
+            except Exception as exc:
+                result = {"ok": False, "detail": str(exc)}
+            self._send_json(result, 200 if result.get("ok") else 400)
+            return
+
+        if parsed.path == f"{API_PREFIX}/memory/session-line/add":
+            entry_id = str(data.get("id", "")).strip()
+            hhmm = str(data.get("time", "")).strip()
+            text = str(data.get("text", "")).strip()
+            if not entry_id or not hhmm or not text:
+                self._send_json({"error": "Missing id, time or text"}, 400)
+                return
+            try:
+                result = add_session_log_line(entry_id, hhmm, text)
+            except Exception as exc:
+                result = {"ok": False, "detail": str(exc)}
+            self._send_json(result, 200 if result.get("ok") else 400)
+            return
+
+        if parsed.path == f"{API_PREFIX}/memory/session-line/update":
+            entry_id = str(data.get("id", "")).strip()
+            line_index = data.get("line_index")
+            hhmm = str(data.get("time", "")).strip()
+            text = str(data.get("text", "")).strip()
+            if not entry_id or line_index is None or not hhmm or not text:
+                self._send_json({"error": "Missing id, line_index, time or text"}, 400)
+                return
+            try:
+                result = update_session_log_line(entry_id, line_index, hhmm, text)
+            except Exception as exc:
+                result = {"ok": False, "detail": str(exc)}
+            self._send_json(result, 200 if result.get("ok") else 400)
+            return
+
+        if parsed.path == f"{API_PREFIX}/memory/session-line/delete":
+            entry_id = str(data.get("id", "")).strip()
+            line_index = data.get("line_index")
+            if not entry_id or line_index is None:
+                self._send_json({"error": "Missing id or line_index"}, 400)
+                return
+            try:
+                result = delete_session_log_line(entry_id, line_index)
             except Exception as exc:
                 result = {"ok": False, "detail": str(exc)}
             self._send_json(result, 200 if result.get("ok") else 400)
