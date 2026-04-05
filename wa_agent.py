@@ -5835,8 +5835,8 @@ def upsert_daily_log(conn, wa_id, date_str, new_sentence, logged_at=None):
     conn.row_factory = sqlite3.Row
 
     row = conn.execute(
-        "SELECT id, content, memory_key FROM wa_session_memories WHERE wa_id=? AND (memory_key=? OR memory_key LIKE ?)",
-        (wa_id, key, f"daily:{date_str}%"),
+        "SELECT id, content, memory_key FROM wa_session_memories WHERE wa_id=? AND memory_key=?",
+        (wa_id, key),
     ).fetchone()
 
     if row:
