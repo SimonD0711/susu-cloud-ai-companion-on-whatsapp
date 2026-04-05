@@ -1,6 +1,36 @@
-# 苏苏（Susu）WhatsApp 聊天机器人 — 运维手册
+# 苏苏（Susu）WhatsApp 聊天机器人 — 生产运维手册
 
-> **最后更新：2026-04-03** | 架构版本：v4（含短期记忆全面重构 + 反馈机制 + 时间桶修复）
+> **最后更新：2026-04-04** | 架构版本：v4（含短期记忆全面重构 + 反馈机制 + 时间桶修复）
+
+**定位：** 本文件是当前项目唯一的人工维护生产运维手册。生产部署、链路切换、回滚、排障、后台入口与关键环境变量，统一以本文件为准。
+
+---
+
+## 当前生产链路
+
+### 回复链路（线上实际状态）
+
+- **普通聊天：** `relay + claude-opus-4-6`
+- **联网搜索：** `Cloudflare AI Gateway + Anthropic native /messages + claude-opus-4-6 + web_search`
+- **搜索意图判断：** `MiniMax Router (MiniMax-M2.5-highspeed)`
+- **语音转写：** `Groq Whisper via Cloudflare Worker`
+- **语音回复：** `MiniMax TTS`
+
+### 回复控制机制
+
+- 每个 `wa_id` 有一个 reply worker
+- 每轮正式生成回复时会拉起一个独立 reply subprocess
+- 如果回复发出前又收到同联系人新消息，旧 subprocess 会被标记过时并终止，再按最新上下文重算
+- 这保证不会发出明显过期回复，但对慢模型/搜索链路会增加重算成本
+- 回复子进程现已加总超时保护：默认 `WA_REPLY_GENERATION_TIMEOUT_SECONDS=55`，超时会终止子进程并返回 fallback，避免单次回复卡十几分钟
+- 聊天档案回填已移出热路径：`get_db()` 不再每次顺手扫历史库，改成后台 `archive_backfill_loop()` 线程异步回填/补链接
+
+### 上下文增强（线上实际开启）
+
+- **MiniMax Router：** 每条文本消息先判断 `should_search` / `use_previous_context` / `needs_history_recall`
+- **历史回看：** 命中时会把 recent history 从 12 条扩大到 36 条，并从 `wa_messages` 中召回更相关旧对话
+- **引用消息展开：** 如果用户引用较早消息，会把该条被引用消息的完整正文直接注入 prompt
+- **回复质检：** 最终回复前会做一层轻量质检，优先修正第三人称称呼、奇怪标点、过早装不知道
 
 ---
 
@@ -38,14 +68,17 @@ C:\Users\ding7\Documents\susu-cloud\   # 本地开发目录（monolith + modular
 | `build_structured_context_from_runtime_context` | ~6258 | 生成 system prompt（**日期在此注入**） |
 | `extract_location_from_text` | ~1005 | LLM 提取用户位置（**已改简体中文 Prompt**） |
 | `maybe_update_user_location` | ~971 | 检测并更新 current_location（**含放假记忆触发**） |
-| `record_batch_side_effects` | ~6165 | 回复后副作用（记忆 + 位置 + 提醒） |
-| `process_pending_replies_for_contact` | ~6192 | Reply worker 主循环 |
+| `record_batch_side_effects` | ~6725 | 回复后副作用（含轮次触发提取） |
+| `process_pending_replies_for_contact` | ~7050 | Reply worker 主循环 |
 | `spawn_reply_generation_subprocess` | ~6500 | 启动 reply subprocess |
-| `ensure_reply_worker_running` | ~6446 | 触发 reply worker 线程 |
-| `recover_pending_reply_contacts_once` | ~6475 | 恢复扫描（包含 audio 联系人） |
-| `maybe_extract_memories` | ~5042 | LLM 抽取长期记忆（含冷却机制） |
-| `maybe_extract_session_memories` | ~5161 | LLM 抽取短期记忆（含 rate limiting + 已有记忆去重） |
-| `heuristic_extract_session_memories` | ~5129 | 启发式短期记忆回退（已修复碎片化 + infer_observed_at） |
+| `ensure_reply_worker_running` | ~7084 | 触发 reply worker 线程 |
+| `recover_pending_reply_contacts_once` | ~7091 | 恢复扫描（包含 audio 联系人） |
+| `maybe_extract_memories` | ~5074 | LLM 抽取长期记忆（含全局冷却） |
+| `maybe_extract_session_memories` | ~5258 | LLM 抽取短期记忆（追加每日日志，含轮次触发） |
+| `upsert_daily_log` | ~5211 | 追加句子到每日日志，按句去重 |
+| `promote_to_long_term` | ~5240 | 提升到长期记忆（含相似度去重） |
+| `_should_trigger_session_extraction` | ~6711 | 轮次触发判断（每3轮/20分钟） |
+| `heuristic_extract_session_memories` | ~5135 | 启发式短期记忆回退（已修复碎片化 + infer_observed_at） |
 | `infer_observed_at_from_text` | ~4058 | 从时间词推断事件实际发生时间 |
 | `bump_session_memory_use_count` | ~4630 | 追踪记忆被引用次数，>=5次延长TTL |
 | `upsert_session_memory` | ~4599 | 写入短期记忆（支持 memory_type + use_count） |
@@ -68,6 +101,14 @@ C:\Users\ding7\Documents\susu-cloud\   # 本地开发目录（monolith + modular
 | cheungchau-api | - | /var/www/simond-photo-api/ | 长洲照片 API |
 
 **SSH 连接：** `ssh -p 2222 root@Tokyo`
+
+### 当前运行文件与真实配置
+
+- **主进程文件：** `/var/www/html/wa_agent.py`
+- **数据库：** `/var/www/html/wa_agent.db`
+- **生产环境变量：** `/etc/wa-agent.env`
+- **日志：** `/var/log/wa_agent.log`
+- **systemd 名称：** 文档内习惯写 `wa-agent`，但现场也可能是手动 nohup 进程；以 `ps aux | grep wa_agent.py` 结果为准
 
 ---
 
@@ -115,6 +156,27 @@ cd /var/www/html
 git log --oneline -5
 cd /var/www/html && git revert HEAD && systemctl restart wa-agent
 ```
+
+### 当前推荐部署步骤（以现场为准）
+
+```powershell
+# 本地改完后直接 SCP 覆盖
+scp -P 2222 C:\Users\ding7\Documents\susu-cloud\wa_agent.py root@Tokyo:/var/www/html/wa_agent.py
+
+# SSH 到 Tokyo 检查语法并重启
+ssh -p 2222 root@Tokyo
+python3 -m py_compile /var/www/html/wa_agent.py
+pkill -f wa_agent.py
+nohup /usr/bin/python3 /var/www/html/wa_agent.py > /var/log/wa_agent.log 2>&1 &
+ps aux | grep wa_agent.py | grep -v grep
+```
+
+### 不要依赖的假设
+
+- 不要假设 Tokyo 可访问 GitHub
+- 不要假设 `systemctl restart wa-agent` 一定存在
+- 不要假设 `src/` 模块化代码就是生产实际运行代码
+- 生产真实行为以 `/var/www/html/wa_agent.py` 为准
 
 ---
 
@@ -342,6 +404,126 @@ SELECT id, direction, body, created_at FROM wa_messages ORDER BY id DESC LIMIT 1
 - **文件：** `cleanup_session_memories.sql`
 - 用途：查看/删除噪音短期记忆（超短内容、纯问候句、重复记忆、过期记忆）
 
+### 11. Phase 3 Bug 修复：`get_date_offset` 未定义
+- **文件：** `wa_agent.py` `maybe_extract_session_memories`
+- **问题：** Prompt f-string 中引用 `get_date_offset()` 但该函数不存在，导致 `NameError`
+- **修复：** 新增 `_date_offset(date_str, days)` 辅助函数（行 ~5199），替换 prompt 中的所有调用
+
+### 12. Phase 4：轮次触发机制
+- **文件：** `wa_agent.py` `record_batch_side_effects`、`_should_trigger_session_extraction`
+- **行为：** `maybe_extract_session_memories` 改为按轮次触发（每 3 轮 OR 每 20 分钟）
+- **状态变量：** `_session_extraction_state = {wa_id: {"turns": N, "last_at": timestamp}}`
+
+### 13. Phase 5：句子级打分
+- **文件：** `wa_agent.py` `score_memory_text`、`_score_text`（新增）
+- **行为：** 多句子记忆按句拆分后取最高分，避免整段低分句拉低有效句子
+
+### 14. Phase 6：Promote 相似度去重
+- **文件：** `wa_agent.py` `promote_to_long_term`
+- **行为：** 提升前检查与现有长期记忆的相似度（Jaccard 阈值 0.65），相似则跳过
+
+### 15. 管理页面短期记忆显示修复
+- **文件：** `susu_admin_core.py`、`susu-memory-admin.html`
+- **问题：** `fetch_susu_memory` 把 `daily_log` 条目的 `bucket` 覆盖为时间计算的 `within_7d`，导致显示错误标签
+- **修复：**
+  - `SESSION_BUCKET_LABELS` 新增 `"daily_log": "每日日誌"`
+  - `bucket` 赋值逻辑优先保留 `daily_log`
+  - 统计新增 `daily_log_count`；前端显示加入日志计数
+
+### 16. 每日日志排除 Q&A 对话
+- **文件：** `wa_agent.py` `maybe_extract_session_memories` prompt
+- **问题：** 苏苏的问题和 Simon 的回答被当成事件存入每日日志
+- **修复：** Prompt 新增排除规则，Q&A 类型对话不存入每日日志
+
+### 17. 每日日志每条带时间码
+- **文件：** `wa_agent.py` `upsert_daily_log`
+- **行为：** 每条存入日志的句子带 `HH:MM` 前缀，如 `14:32 對方啱啱食咗蛋糕`
+
+### 18. 废弃 `maybe_extract_qa_turn_memory`
+- **文件：** `wa_agent.py` `record_batch_side_effects`
+- **原因：** Q&A 记忆产生碎片化记录，已由每日日志替代
+
+### 19. 修复 `upsert_daily_log` 支持旧格式
+- **文件：** `wa_agent.py` `upsert_daily_log`
+- **问题：** 查询用 `memory_key='daily:xxx'`，但旧记录 `memory_key='within_7d:xxx'`，导致每日日志一直新开记录
+- **修复：** 查询兼容旧格式 `memory_key LIKE 'daily:%'`，找到后更新并统一 bucket
+
+### 20. 全局时区改为 HKT（+08:00）
+- **涉及文件：** `wa_agent.py`、`db.py`、`memory.py`、`susu_admin_core.py`
+- **改动：** `utc_now()` 改为返回 HKT；所有业务逻辑时间比较从 UTC 统一为 HKT；`observed_at`/`created_at`/`expires_at` 存储为 `+08:00`
+- **DB migration：** `migrate_timezone.py` — 所有表时间列 +8h，`+00:00` → `+08:00`；`fix_tz2.py` — 修正时区后缀
+
+### 2026-04-04 改动
+
+#### 1. LLM Provider 切换为 OpenRouter
+- **变更：** Relay API Key 从 `[REDACTED]` 改为 `[REDACTED]`
+- **Base URL：** 从 `https://apiapipp.com/v1` 改为 `https://openrouter.ai/api/v1`
+- **模型：** 改用 OpenRouter 格式 ID
+  - Primary：`claude-opus-4-6` → `anthropic/claude-opus-4.6`
+  - Fallback：`claude-sonnet-4-6` → `anthropic/claude-sonnet-4`
+- **配置文件：** `/etc/wa-agent.env`（生产）、`.env.openrouter` / `.env.relay`（本地 Git）
+- **切换方法：** `cp .env.openrouter .env` 或 `cp .env.relay .env`，然后重启服务
+
+#### 2. Relay 请求头改为可配置
+- **变更：** `wa_agent.py` 与 `src/ai/llm/relay.py` 支持自定义主认证头、额外认证头、可选 `User-Agent`
+- **新增环境变量：** `WA_RELAY_AUTH_HEADER`、`WA_RELAY_AUTH_TOKEN`、`WA_RELAY_EXTRA_AUTH_HEADER`、`WA_RELAY_EXTRA_AUTH_TOKEN`、`WA_RELAY_USER_AGENT`
+- **用途：** 为 Cloudflare AI Gateway 这类要求 `cf-aig-authorization` 的兼容网关预留接入位，不再硬编码 `Authorization: Bearer ...`
+- **现状：** 当前生产普通聊天继续走原 relay；Cloudflare Anthropic native 改走独立搜索链路
+
+#### 3. 主聊天链路支持 Anthropic Native + Claude Web Search
+- **变更：** `wa_agent.py` 新增 Cloudflare AI Gateway Anthropic native `/messages` 调用，主模型可切到 `claude-opus-4-6`
+- **当前实际用法：** 普通聊天继续走 `relay + claude-opus-4-6`；联网搜索改走 `Cloudflare AI Gateway + Anthropic native /messages + claude-opus-4-6 + web_search`
+- **搜索策略：** 搜索分流命中后，Claude 原生 `web_search_20250305` tool 由 Opus 自行判断是否真的搜索
+- **旁路：** 旧 Tavily/Bing/DuckDuckGo 搜索执行链路已被 Anthropic native 搜索优先替代，但本地搜索规划/回退逻辑仍保留
+
+#### 4. MiniMax Router 接管搜索意图判断
+- **变更：** 每条文本消息现在先走 `MiniMax` 轻量 Router，而不是先靠关键词规则判定是否搜索
+- **接口：** `https://api.minimaxi.com/v1/text/chatcompletion_v2`
+- **当前模型：** `MiniMax-M2.5-highspeed`
+- **作用：** Router 负责输出 `should_search`、`mode`、`use_previous_context`、`needs_history_recall`、`reply_task_type`，搜索分流和上下文回看由它驱动
+- **回退：** 如果 MiniMax Router 超时、返回坏 JSON 或失败，会回退到旧规则逻辑
+
+#### 5. 历史回看与引用消息增强
+- **变更：** 当 Router 判断 `needs_history_recall` 或 `use_previous_context` 时，`build_runtime_context()` 会把 recent history 窗口从 12 条扩到 36 条，并从 `wa_messages` 中挑选相关旧对话注入 `Recovered older chat context`
+- **引用消息：** 如果用户引用一条较早消息，系统会读取该条被引用消息的完整正文，而不只是短 preview，再注入 prompt
+- **效果：** 处理「昨天那个呢」「你帮我搜嘛」「引用昨天消息再追问」这类上下文依赖场景时，不再只依赖短期记忆
+
+#### 6. 本地聊天档案层（原话优先）
+- **模块：** `chat_archive.py`
+- **表：** `wa_message_archive`、`wa_message_links`
+- **写入：** 新消息入站/出站会双写到档案表；旧 `wa_messages` 会自动回填到档案表
+- **用途：** 回复前优先按 `message_id`、日期、原话记录查询，而不是先看摘要
+- **日期回看：** 用户说 `昨天/前天/今日/噚日/昨日` 时，会优先注入当天原话；现已支持 `4.3`、`4/3`、`4月3号` 这类显式日期
+- **限制：** 如果 WhatsApp webhook 当时没有给出 `context.id`，而且原话本身也不在本地库里，就无法做到 100% 精确还原
+
+#### 7. 搜索回复格式与轻量质检
+- **变更：** `normalize_live_search_reply()` 不再把多行硬拼成大量 `；`，会收敛成更自然的逗号/空格句式
+- **代词修正：** 搜索提示与回复质检会尽量把对用户的称呼固定成 `你`，避免把用户说成 `佢`
+- **Reply Critic：** 主回复结束后会经过一层轻量质检，优先修复：奇怪标点、把用户说成第三人称、明明可接住语境却过早装不知道
+
+#### 8. 记忆层改为轻量 LLM 主导
+- **长期记忆提取：** `maybe_extract_memories()` 现改走 `MiniMax Router` 级别的轻量调用，不再用主回复模型做后台记忆分类
+- **短期记忆 / 每日日志提取：** `maybe_extract_session_memories()` 与 `backfill_daily_log_for_date()` 也改走轻量模型
+- **关键改动：** 已停掉 `daily log -> promote_to_long_term()` 这条污染链路；每日日志不再自动升长期
+- **当前策略：** 轻量模型负责判断“该不该记 / 记到哪一层”，本地规则只保留去重、敏感过滤、时间性事件兜底
+- **已清理的伪长期记忆：** 例如“噚日中午飲咗白酒”“在外地长岭”“闯红灯”等最近事件，已从长期记忆移除
+
+#### 9. 位置理解优先保留具体地点
+- **变更：** 位置抽取 prompt 改为优先保留用户原话中的最具体层级位置，避免把 `长岭县太平山镇` 简化成 `长岭` 或 `姥姥家`
+- **覆盖策略：** 如果新识别到的位置更泛，不会降级覆盖当前更具体的位置
+- **主号相对地点规则：**
+  - `姥姥家` -> `长岭县太平山镇`
+  - `太奶家` -> `长岭县`
+  - `我家`：前文讲长春时 -> `长春市南关区`；前文讲珠海时 -> `珠海市金湾区`
+  - `宿舍` / `学校` -> `香港九龙塘`
+
+#### 10. 主动消息改成规则 + LLM 决策
+- **修复：** `src/wa_agent/proactive.py` 现改为优先从环境变量读取 `WA_ACCESS_TOKEN / WA_PHONE_NUMBER_ID`，不再因为数据库设置缺失而整条主动消息链路失效
+- **触发逻辑：** 保留硬规则门槛（静默时间、cooldown、每日上限、是否仍在等待对方回复）
+- **去掉随机抽签：** eligible 后不再按 `probability` 随机发
+- **LLM 决策：** 由 `MiniMax Router` 判断 `should_send / confidence / topic / tone / reason`
+- **正文生成：** 最终 draft 仍然交给 `relay + claude-opus-4-6`
+
 ---
 
 ## 苏苏记忆管理页面
@@ -399,7 +581,12 @@ SELECT id, direction, body, created_at FROM wa_messages ORDER BY id DESC LIMIT 1
 
 ## 环境变量
 
-关键配置在 `/etc/wa-agent.env`（systemd 读取）：
+关键配置在 `/etc/wa-agent.env`（systemd 读取）。
+
+**LLM Provider 切换：** 本地 Git 仓库有切换脚本和配置文件：
+- `.env.openrouter` — OpenRouter 配置
+- `.env.relay` — 原 relay 配置
+- 切换方法：`cp .env.openrouter .env` 或 `cp .env.relay .env`，然后重启服务
 
 | 变量 | 用途 |
 |------|------|
@@ -407,13 +594,75 @@ SELECT id, direction, body, created_at FROM wa_messages ORDER BY id DESC LIMIT 1
 | `WA_PHONE_NUMBER_ID` | WhatsApp Phone Number ID |
 | `WA_GRAPH_VERSION` | Graph API 版本（当前 v22.0）|
 | `WA_RELAY_API_KEY` | LLM Relay API Key |
+| `WA_RELAY_AUTH_HEADER` | Relay 主认证头名，默认 `Authorization` |
+| `WA_RELAY_AUTH_TOKEN` | Relay 主认证头值，留空时自动使用 `Bearer ${WA_RELAY_API_KEY}` |
+| `WA_RELAY_EXTRA_AUTH_HEADER` | Relay 额外认证头名（如 `cf-aig-authorization`） |
+| `WA_RELAY_EXTRA_AUTH_TOKEN` | Relay 额外认证头值 |
+| `WA_RELAY_USER_AGENT` | Relay 自定义 User-Agent |
 | `WA_RELAY_MODEL` | LLM 模型名（默认 claude-opus-4-6）|
+| `WA_ANTHROPIC_GATEWAY_BASE_URL` | Cloudflare AI Gateway Anthropic base URL，形如 `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic/v1` |
+| `WA_ANTHROPIC_GATEWAY_TOKEN` | Cloudflare AI Gateway token（用于 `cf-aig-authorization`） |
+| `WA_ANTHROPIC_MODEL` | Anthropic native 主模型，当前建议 `claude-opus-4-6` |
+| `WA_ANTHROPIC_VERSION` | Anthropic API version，默认 `2023-06-01` |
+| `WA_ANTHROPIC_USER_AGENT` | Anthropic native 请求使用的 User-Agent |
+| `WA_ANTHROPIC_WEB_SEARCH_ENABLED` | 是否默认为每次主聊天请求附带 Claude web_search tool |
+| `WA_ANTHROPIC_WEB_SEARCH_MAX_USES` | Claude web_search 单次请求最大搜索次数 |
+| `WA_ROUTER_ENABLED` | 是否启用 MiniMax 轻量 Router |
+| `WA_ROUTER_API_KEY` | MiniMax Router API Key |
+| `WA_ROUTER_BASE_URL` | MiniMax Router base URL，当前 `https://api.minimaxi.com` |
+| `WA_ROUTER_MODEL` | MiniMax Router 模型，当前线上为 `MiniMax-M2.5-highspeed` |
 | `WA_GROQ_API_KEY` | Groq API Key（当前有效）|
 | `WA_MINIMAX_API_KEY` | MiniMax TTS API Key |
 | `WA_GEMINI_API_KEY` | Gemini API Key |
 | `WA_PROACTIVE_ENABLED` | 主动消息开关 |
 | `WA_ADMIN_WA_ID` | 管理员 WhatsApp ID |
 | `WA_USER_ICAL_URL` | 用户 Google Calendar iCal URL（2026-04-03 新增）|
+
+---
+
+## 第三方服务清单
+
+本节是生产依赖的后台/平台总表。**密钥值本身不写在文档里**，统一以 `/etc/wa-agent.env`、平台控制台或服务器现场为准。
+
+| 服务 | 当前用途 | 当前状态 | 核心入口 / 备注 |
+|------|------|------|------|
+| WhatsApp Cloud API | 主消息收发 | 生产中 | 依赖 `WA_ACCESS_TOKEN`、`WA_PHONE_NUMBER_ID` |
+| 原 relay (`apiapipp.com`) | 普通聊天主链路 | 生产中 | `WA_RELAY_BASE_URL=https://apiapipp.com/v1` |
+| Cloudflare AI Gateway | Claude 原生搜索链路 | 生产中 | `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic/v1` |
+| Anthropic via Cloudflare | `claude-opus-4-6` + `web_search` | 生产中 | 仅搜索分流使用，不是普通聊天主链路 |
+| MiniMax Router | 每条消息意图判断 / 上下文回看信号 | 生产中 | `https://api.minimaxi.com/v1/text/chatcompletion_v2`，当前模型 `MiniMax-M2.5-highspeed` |
+| Local chat archive | 原话档案 / 引用关系 / 日期回看 | 生产中 | `chat_archive.py` + `wa_message_archive` / `wa_message_links` |
+| MiniMax TTS | 语音回复 | 生产中 | `WA_MINIMAX_API_KEY` / `WA_MINIMAX_BASE_URL` |
+| Groq Whisper | 语音转写 | 生产中 | 通过 Cloudflare Worker 中转 |
+| Cloudflare Worker `relay-proxy` | Whisper 转写代理 | 生产中 | `https://relay-proxy.simonding711.workers.dev/openai/v1/audio/transcriptions` |
+| Google iCal | 日历上下文 | 可选 | `WA_USER_ICAL_URL` |
+| OpenRouter | 旧实验链路 | 停用 | 账号可用但 Claude provider 受限，不作为生产依赖 |
+
+### Cloudflare 相关后台
+
+- **Account ID：** `e8cadaaa1111961b152d822ea5bdbfd8`
+- **Gateway：** `default`
+- **用途：** Anthropic native `/messages` 搜索链路
+- **注意：** Cloudflare `compat/chat/completions` 的 Anthropic 模型名映射不稳定；生产搜索链路固定走 Anthropic native `/anthropic/v1/messages`
+
+### MiniMax 相关后台
+
+- **官网：** `https://www.minimaxi.com/`
+- **开放平台：** `https://platform.minimaxi.com/`
+- **Router 当前确认可用模型：** `MiniMax-M2.5`、`MiniMax-M2.5-highspeed`、`MiniMax-M2.7`、`MiniMax-M2`、`MiniMax-M2.1`（以 OpenAI-compatible 探测结果为准）
+- **当前线上 Router：** `MiniMax-M2.5-highspeed`
+- **注意：** `MiniMax-M2.5-High-Speed` 这种大小写/连字符写法无效；应使用 `MiniMax-M2.5-highspeed`
+
+### OpenRouter 现状
+
+- 新旧账号都验证过：`/auth/key` 可用，但 Claude provider 仍返回 `403 violation of provider Terms Of Service`
+- 结论：OpenRouter 不再作为生产 Claude 路径
+
+### 现场确认顺序
+
+1. 先看 `/etc/wa-agent.env`
+2. 再看 `OPERATIONS.md`
+3. 最后再看平台控制台（Cloudflare / MiniMax / Meta）
 
 ---
 

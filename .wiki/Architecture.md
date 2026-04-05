@@ -183,4 +183,4 @@ Located in `src/wa_agent/proactive.py` (~770 lines), the proactive engine:
 ## See Also
 
 - [REFACTOR-PLAN.md](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/blob/main/REFACTOR-PLAN.md) — Architecture refactor plan
-- [HANDOVER.md](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/blob/main/HANDOVER.md) — Operations manual (production details)
+- [OPERATIONS.md](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/blob/main/OPERATIONS.md) — Operations manual (production details)

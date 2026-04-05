@@ -36,6 +36,26 @@ class RelayProvider(LLMProvider):
     def __init__(self, config: AIConfig):
         self.config = config
 
+    def _build_headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+
+        auth_header = (self.config.RELAY_AUTH_HEADER or "Authorization").strip()
+        auth_token = (self.config.RELAY_AUTH_TOKEN or "").strip()
+        extra_auth_header = (self.config.RELAY_EXTRA_AUTH_HEADER or "").strip()
+        extra_auth_token = (self.config.RELAY_EXTRA_AUTH_TOKEN or "").strip()
+        user_agent = (self.config.RELAY_USER_AGENT or "").strip()
+
+        if not auth_token and self.config.RELAY_API_KEY:
+            auth_token = f"Bearer {self.config.RELAY_API_KEY}"
+        if auth_header and auth_token:
+            headers[auth_header] = auth_token
+        if extra_auth_header and extra_auth_token:
+            headers[extra_auth_header] = extra_auth_token
+        if user_agent:
+            headers["User-Agent"] = user_agent
+
+        return headers
+
     def _do_request(
         self,
         model: str,
@@ -59,10 +79,7 @@ class RelayProvider(LLMProvider):
         req = urllib.request.Request(
             url,
             data=data,
-            headers={
-                "Authorization": f"Bearer {self.config.RELAY_API_KEY}",
-                "Content-Type": "application/json",
-            },
+            headers=self._build_headers(),
             method="POST",
         )
         try:

@@ -217,4 +217,4 @@ All variables from `.env.example` can be passed via `--env-file` or `-e` flags.
 
 - [Home](Home) — Project overview
 - [Architecture](Architecture) — System design details
-- [HANDOVER.md](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/blob/main/HANDOVER.md) — Production operations manual
+- [OPERATIONS.md](https://github.com/SimonD0711/susu-cloud-ai-companion-on-whatsapp/blob/main/OPERATIONS.md) — Production operations manual

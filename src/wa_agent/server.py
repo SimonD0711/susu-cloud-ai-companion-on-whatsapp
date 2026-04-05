@@ -95,6 +95,20 @@ def main() -> None:
 
     try:
         import wa_agent as agent_module
+        if hasattr(agent_module, "daily_log_backfill_loop"):
+            threading.Thread(target=agent_module.daily_log_backfill_loop, name="wa-daily-log-backfill-loop", daemon=True).start()
+    except Exception:
+        pass
+
+    try:
+        import wa_agent as agent_module
+        if hasattr(agent_module, "archive_backfill_loop"):
+            threading.Thread(target=agent_module.archive_backfill_loop, name="wa-archive-backfill-loop", daemon=True).start()
+    except Exception:
+        pass
+
+    try:
+        import wa_agent as agent_module
         if hasattr(agent_module, "pending_reply_recovery_loop"):
             threading.Thread(target=agent_module.pending_reply_recovery_loop, name="wa-reply-recovery-loop", daemon=True).start()
     except Exception:

@@ -24,6 +24,8 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
+from chat_archive import archive_message, backfill_message_archive_rows, ensure_archive_schema, load_archive_messages_by_date, reconcile_message_archive_links
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -58,6 +60,22 @@ RELAY_API_KEY = os.environ.get("WA_RELAY_API_KEY", "")
 RELAY_MODEL = os.environ.get("WA_RELAY_MODEL", SUSU_LOCKED_RELAY_MODEL)
 RELAY_FALLBACK_MODEL = os.environ.get("WA_RELAY_FALLBACK_MODEL", "claude-sonnet-4-6")
 RELAY_BASE_URL = os.environ.get("WA_RELAY_BASE_URL", "https://apiapipp.com/v1")
+RELAY_AUTH_HEADER = os.environ.get("WA_RELAY_AUTH_HEADER", "Authorization").strip()
+RELAY_AUTH_TOKEN = os.environ.get("WA_RELAY_AUTH_TOKEN", "").strip()
+RELAY_EXTRA_AUTH_HEADER = os.environ.get("WA_RELAY_EXTRA_AUTH_HEADER", "").strip()
+RELAY_EXTRA_AUTH_TOKEN = os.environ.get("WA_RELAY_EXTRA_AUTH_TOKEN", "").strip()
+RELAY_USER_AGENT = os.environ.get("WA_RELAY_USER_AGENT", "").strip()
+ANTHROPIC_GATEWAY_BASE_URL = os.environ.get("WA_ANTHROPIC_GATEWAY_BASE_URL", "").strip()
+ANTHROPIC_GATEWAY_TOKEN = os.environ.get("WA_ANTHROPIC_GATEWAY_TOKEN", "").strip()
+ANTHROPIC_MODEL = os.environ.get("WA_ANTHROPIC_MODEL", SUSU_LOCKED_RELAY_MODEL).strip() or SUSU_LOCKED_RELAY_MODEL
+ANTHROPIC_VERSION = os.environ.get("WA_ANTHROPIC_VERSION", "2023-06-01").strip() or "2023-06-01"
+ANTHROPIC_USER_AGENT = os.environ.get("WA_ANTHROPIC_USER_AGENT", "Mozilla/5.0").strip() or "Mozilla/5.0"
+ANTHROPIC_WEB_SEARCH_ENABLED = os.environ.get("WA_ANTHROPIC_WEB_SEARCH_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+ANTHROPIC_WEB_SEARCH_MAX_USES = max(1, int(os.environ.get("WA_ANTHROPIC_WEB_SEARCH_MAX_USES", "2") or "2"))
+ROUTER_ENABLED = os.environ.get("WA_ROUTER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+ROUTER_API_KEY = os.environ.get("WA_ROUTER_API_KEY", "").strip()
+ROUTER_BASE_URL = os.environ.get("WA_ROUTER_BASE_URL", "https://api.minimaxi.com").strip() or "https://api.minimaxi.com"
+ROUTER_MODEL = os.environ.get("WA_ROUTER_MODEL", "MiniMax-M2.5-highspeed").strip() or "MiniMax-M2.5-highspeed"
 
 GEMINI_API_KEY = os.environ.get("WA_GEMINI_API_KEY") or os.environ.get("GOOGLE_KEY", "")
 GEMINI_MODEL = os.environ.get("WA_GEMINI_MODEL", "gemini-2.5-flash")
@@ -85,6 +103,7 @@ MAX_INLINE_REPLY_EMOJIS = int(os.environ.get("WA_MAX_INLINE_REPLY_EMOJIS", "1"))
 READ_RECEIPT_DELAY_SECONDS = float(os.environ.get("WA_READ_RECEIPT_DELAY_SECONDS", "0.45"))
 REPLY_WORKER_STALE_SECONDS = float(os.environ.get("WA_REPLY_WORKER_STALE_SECONDS", "90"))
 REPLY_RECOVERY_SCAN_SECONDS = float(os.environ.get("WA_REPLY_RECOVERY_SCAN_SECONDS", "30"))
+REPLY_GENERATION_TIMEOUT_SECONDS = float(os.environ.get("WA_REPLY_GENERATION_TIMEOUT_SECONDS", "55"))
 
 if ZoneInfo:
     try:
@@ -103,16 +122,21 @@ _reply_worker_states = {}
 _reply_worker_states_lock = threading.Lock()
 _read_scheduler_states = {}
 _read_scheduler_states_lock = threading.Lock()
-_session_extraction_locks = {}  # {wa_id: threading.Lock()}
-_session_extraction_locks_lock = threading.Lock()
+_session_round_state = {}  # {wa_id: {"turns": 0, "last_at": timestamp}}
 _last_memory_extraction = 0.0
 _MEMORY_EXTRACTION_COOLDOWN = 300.0  # 5 minutes
+_SIDEEFFECT_EXTRACTION_THRESHOLD_ROUNDS = 5
+_SIDEEFFECT_EXTRACTION_THRESHOLD_SECONDS = 1800.0  # 30 minutes
+_session_extraction_state = {}  # {wa_id: {"turns": 0, "last_at": 0.0}}
+_daily_log_backfill_state = {"last_target_date": ""}
+_archive_backfill_state = {"last_at": 0.0}
 
 
 WEATHER_QUERY_KEYWORDS = (
     "天氣", "天气", "weather", "氣溫", "气温", "幾度", "几度", "落雨", "落唔落雨",
     "會唔會落雨", "会不会下雨", "下雨", "驟雨", "骤雨", "雷暴", "有冇雨", "有沒有雨",
-    "熱唔熱", "热不热", "凍唔凍", "冷唔冷", "濕度", "湿度",
+    "熱唔熱", "热不热", "凍唔凍", "冷唔冷", "濕度", "湿度", "多少度", "幾多度", "几多度",
+    "會是多少度", "会是多少度", "幾度呀", "几度呀",
 )
 TODAY_WEATHER_HINTS = ("今日", "今天", "而家", "依家", "宜家", "現在", "现在", "今晚", "今朝", "今日份")
 TOMORROW_WEATHER_HINTS = ("聽日", "听日", "明日", "明天", "tomorrow")
@@ -205,7 +229,7 @@ def _is_toggle_only_message(text):
 
 EXPLICIT_SEARCH_HINTS = (
     "幫我查", "幫我搵", "查下", "查吓", "查一查", "搜尋", "搜索",
-    "search", "lookup", "google", "上網", "網上", "online search",
+    "搜下", "搜一下", "搜嘛", "搜索下", "查一下", "查嘛", "帮我搜", "幫我搜", "search", "lookup", "google", "上網", "網上", "online search",
 )
 NEWS_QUERY_KEYWORDS = (
     "新聞", "新闻", "大新聞", "大新闻", "news", "頭條", "头条", "headline",
@@ -232,6 +256,23 @@ MUSIC_RECOMMENDATION_HINTS = (
 LIVE_SEARCH_FOLLOWUP_HINTS = (
     "快啲幫我查", "快点帮我查", "再幫我查", "再帮我查", "繼續查", "继续查", "查啦", "快啲查",
     "快点查", "幫我查啦", "帮我查啦", "快啲幫我睇", "快点帮我看", "再睇下", "再看下",
+    "而家呢", "现在呢", "最近呢", "近排呢", "近期呢", "后续呢", "後續呢", "结果呢", "結果呢",
+    "然后呢", "然後呢", "还有吗", "還有嗎", "还有没有", "還有沒有", "仲有冇", "而家點", "现在怎么样",
+    "你搜下", "你搜下啦", "搜下啦", "搜一下", "搜一下啦", "你搜一下", "你搜一下啦",
+    "你帮我搜下", "你幫我搜下", "你帮我搜一下", "你幫我搜一下", "幫我搜下", "帮我搜下", "幫我搜一下", "帮我搜一下",
+    "你帮我搜嘛", "你幫我搜嘛", "帮我搜嘛", "幫我搜嘛", "你搜嘛", "搜嘛", "查嘛", "你查嘛",
+    "你查下", "你查下啦", "你查一下", "你查一下啦", "你看下", "你看一下", "你睇下", "你睇下啦",
+)
+WEAK_REALTIME_HINTS = (
+    "最近", "近排", "近期", "近況", "近况", "而家點", "依家點", "现在怎么样", "现在怎样",
+    "现在什么情况", "咩情況", "什么情况", "發生咗咩", "發生咩事", "发生了什么", "发生什么事",
+    "有冇更新", "有沒有更新", "有无更新", "有没有更新", "更新咗未", "更新了吗", "仲有冇", "还有没有",
+    "還有沒有", "还有吗", "還有嗎", "最近點", "最近點樣", "最近怎么样", "最近怎样", "后续呢", "後續呢",
+    "後來呢", "后来呢", "結果呢", "结果呢",
+)
+LIVE_SEARCH_TOPIC_HINTS = (
+    "近況", "近况", "後續", "后续", "最新情況", "最新情况", "最新消息", "新進展", "新进展",
+    "有冇新", "有冇後續", "有冇后续", "有没有新的", "有没有后续", "仲有冇", "还有没有", "最近消息",
 )
 COUNT_QUERY_HINTS = ("幾首", "几首", "幾多首", "几多首", "多少首")
 SEARCH_ENTITY_ALIASES = {
@@ -322,33 +363,38 @@ LIVE_SEARCH_SUMMARIZER_PROMPT = textwrap.dedent(
 ).strip()
 LIVE_SEARCH_ROUTER_PROMPT = textwrap.dedent(
     """
-    你係一個超輕量即時搜尋路由器，只做三件事：
+    你係一個超輕量訊息路由器，要判斷三件事：
     1. 判斷用戶問題係咪需要上網查最新/即時/會變動嘅外部資料
-    2. 如果要，揀 mode：weather、news、music、web、none
-    3. 產生短、乾淨、適合搜尋引擎嘅 query
+    2. 判斷呢句係咪明顯依賴前文、舊對話、噚日/之前講過嘅內容
+    3. 如果要搜尋，揀 mode：weather、news、music、web、none，並產生短、乾淨、適合搜尋引擎嘅 query
 
     規則：
     - 只有當答案可能因時間而變，例如今日新聞、現時狀態、最新作品、即時事實，先 should_search=true
     - 問天氣、氣溫、落雨、天文台預報時，mode 應該用 weather
     - 純閒聊、純主觀陪伴、唔使外部資料都答到嘅內容，should_search=false
+    - 如果句子好短、似跟進、似「昨天那個」「你幫我搜嘛」「後續呢」「嗰個呢」，而且明顯要靠前文先明，就 use_previous_context=true
+    - 如果句子提到昨天、之前、上次、嗰個、那個、後續，但目前線索不足，needs_history_recall=true
     - 問「邊首好聽」但同「新歌 / 最新 / 最近作品」一齊出現時，應先查最新作品，mode=music
     - 幫手做簡單別名歸一化，例如「周董」->「周杰倫」
     - query 唔好保留口頭禪、語氣詞、客套語
     - 只輸出 JSON object，格式固定：
-      {"should_search": true, "mode": "news", "query": "香港 最新新聞", "confidence": 0.96}
+      {"should_search": true, "mode": "news", "query": "香港 最新新聞", "use_previous_context": false, "needs_history_recall": false, "reply_task_type": "realtime_query", "confidence": 0.96}
 
     例子：
     用戶：你知唔知今天香港有咩大新聞呀
-    {"should_search": true, "mode": "news", "query": "香港 最新新聞", "confidence": 0.98}
+    {"should_search": true, "mode": "news", "query": "香港 最新新聞", "use_previous_context": false, "needs_history_recall": false, "reply_task_type": "realtime_query", "confidence": 0.98}
 
     用戶：周董新歌哪首好聽呀
-    {"should_search": true, "mode": "music", "query": "周杰倫 最新 新歌", "confidence": 0.94}
+    {"should_search": true, "mode": "music", "query": "周杰倫 最新 新歌", "use_previous_context": false, "needs_history_recall": false, "reply_task_type": "realtime_query", "confidence": 0.94}
 
     用戶：今日香港天氣點樣
-    {"should_search": true, "mode": "weather", "query": "今日 香港 天氣", "confidence": 0.98}
+    {"should_search": true, "mode": "weather", "query": "今日 香港 天氣", "use_previous_context": false, "needs_history_recall": false, "reply_task_type": "realtime_query", "confidence": 0.98}
+
+    用戶：昨天那個呢
+    {"should_search": false, "mode": "none", "query": "", "use_previous_context": true, "needs_history_recall": true, "reply_task_type": "memory_recall", "confidence": 0.82}
 
     用戶：你掛唔掛住我
-    {"should_search": false, "mode": "none", "query": "", "confidence": 0.98}
+    {"should_search": false, "mode": "none", "query": "", "use_previous_context": false, "needs_history_recall": false, "reply_task_type": "casual_chat", "confidence": 0.98}
     """
 ).strip()
 LIVE_SEARCH_REVIEW_PROMPT = textwrap.dedent(
@@ -407,6 +453,7 @@ PRIMARY_USER_MEMORY = textwrap.dedent(
     - 對方戴 Samsung Galaxy Watch，會用 VPN、Imarena.ai、Claude、Sonnet、ChatGPT、Grok，同 Telegram。
     - 對方自建過 Vultr Tokyo VPS，裝 Outline server，用 Clash Verge、Shadowrocket、Clash Meta，Tun Mode + Rule 分流，只想 AI 走代理，仲想喺 VPS 裝 Cloudflare WARP。
     - 對方識普、粵、英，有語言天賦，鍾意撒嬌同甜啲嘅說話。
+    - 對方講「姥姥家」通常指長嶺縣太平山鎮；講「太奶家」通常指長嶺縣；講「我家」時要結合前文判斷，如果前文講緊長春就指長春市南關區，如果前文講緊珠海就指珠海市金灣區；宿舍同學校喺香港九龍塘。
     """
 ).strip()
 
@@ -428,10 +475,11 @@ MEMORY_EXTRACTOR_PROMPT = textwrap.dedent(
 
 RECENT_MEMORY_EXTRACTOR_PROMPT = textwrap.dedent(
     """
-    你係一個短期記憶抽取器，只負責由聊天中抽取未來一星期內仍然有用嘅短期資訊。
+    你係一個短期記憶 / 每日日志抽取器，只負責由聊天中抽取未來一星期內仍然有用嘅近況、事件、臨時狀態。
     只輸出 JSON array。
     每一項都要係 object，格式：
     {"content":"...", "bucket":"within_24h|within_3d|within_7d"}
+    唔好抽取穩定背景、長期偏好、長期關係、長期習慣；嗰啲應該留俾長期記憶抽取器。
     如果冇值得記低嘅內容，就輸出 []。
     唔好輸出任何額外解釋。
     """
@@ -498,6 +546,15 @@ MEMORY_RECALL_MARKERS = (
     "記唔記得", "仲記唔記得", "記得唔記得", "我之前", "我以前",
     "我上星期", "我上周", "我上個月", "我上个月", "我前排",
     "咩", "乜", "什麼", "什么", "邊度", "边度", "幾時", "几时", "幾點", "几点", "？", "?",
+)
+HISTORY_RECALL_STRONG_HINTS = (
+    "噚日", "尋日", "昨日", "昨天", "前日", "前天", "之前", "上次", "後續", "后续",
+    "嗰個", "那个", "嗰件事", "那件事", "你唔記得", "你不记得", "你咩都唔記得", "你什么都不记得",
+    "你記唔記得", "你记不记得", "我噚日都話你知", "我昨天都说了", "我之前講過", "我之前说过",
+)
+HISTORY_RECALL_FOLLOWUP_HINTS = (
+    "你再睇下", "你再看下", "你再看一下", "你再睇一下", "你再睇下啦", "你再看一下啦",
+    "你再睇一睇", "你再看一看", "再睇下", "再看下", "再看一下", "再睇一下",
 )
 ARCHIVE_SEARCH_MARKERS = (
     "食", "飲", "玩", "返", "翻", "去", "到", "忙", "病", "唔舒服", "瞓", "訓",
@@ -646,7 +703,7 @@ def get_runtime_settings(force=False):
 
 
 def utc_now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(HK_TZ).isoformat()
 
 
 def hk_now():
@@ -879,6 +936,12 @@ CN_CITY_ALIASES = {
 }
 
 ALL_LOCATION_ALIASES = {**HK_LOCATION_ALIASES, **CN_CITY_ALIASES}
+ADMIN_RELATIVE_LOCATION_RULES = {
+    "姥姥家": "长岭县太平山镇",
+    "太奶家": "长岭县",
+    "宿舍": "香港九龙塘",
+    "学校": "香港九龙塘",
+}
 
 def normalize_location(loc_text):
     text = clean_text(loc_text).strip()
@@ -906,19 +969,69 @@ _LOCATION_EXTRACT_PROMPT = textwrap.dedent(
     常见的地点变化表达包括："我在X"、"我回了X"、"我到X了"、"我去了X"、"我现在在X"。
     如果有用户位置信息，输出以下格式：
     {{"location": "具体地点"}}
-    地点要使用标准名称，例如"长春"、"深圳"、"北京"、"上海"、"香港"、"九龙城"、"沙田"等。
+    地点要优先保留用户原话里最具体的层级位置；例如如果原文有「长岭县太平山镇」，就不要简化成「长岭」或「姥姥家」。
+    只有在原文本身就只有城市级别时，才输出城市级别名称，例如"长春"、"深圳"、"北京"、"上海"、"香港"、"九龙城"、"沙田"等。
     如果没有位置信息，输出：
     {{"location": null}}
     只输出 JSON，不要加任何解释。
     """
 ).strip()
 
-def extract_location_from_text(text):
+
+def location_specificity_score(loc_text):
+    text = clean_text(loc_text)
+    if not text:
+        return 0
+    score = len(text)
+    for marker, weight in (("省", 2), ("市", 2), ("县", 3), ("區", 3), ("区", 3), ("镇", 4), ("鎮", 4), ("路", 2), ("街", 2), ("村", 2), ("家", -2)):
+        if marker in text:
+            score += weight
+    return score
+
+
+def resolve_relative_location(conn, wa_id, text, current_location_text=""):
+    if (wa_id or "").strip() != ADMIN_WA_ID:
+        return ""
+    value = clean_text(text)
+    if not value:
+        return ""
+    if "我家" in value:
+        current_text = clean_text(current_location_text)
+        context_parts = [value, current_text]
+        if conn and wa_id:
+            try:
+                recent_rows = conn.execute(
+                    """
+                    SELECT body
+                    FROM wa_messages
+                    WHERE wa_id = ? AND direction = 'inbound'
+                    ORDER BY id DESC
+                    LIMIT 8
+                    """,
+                    (wa_id,),
+                ).fetchall()
+                context_parts.extend(clean_text(row["body"]) for row in recent_rows)
+            except Exception:
+                pass
+        combined = " ".join(part for part in context_parts if part)
+        if any(marker in combined for marker in ("珠海", "金灣", "金湾")):
+            return "珠海市金湾区"
+        if any(marker in combined for marker in ("長春", "长春", "南關", "南关")):
+            return "长春市南关区"
+    for alias, resolved in ADMIN_RELATIVE_LOCATION_RULES.items():
+        if alias in value:
+            return resolved
+    return ""
+
+def extract_location_from_text(text, wa_id="", conn=None, current_location_text=""):
     if not text:
         return None
     raw = clean_text(text)
     if not raw or len(raw) > 200:
         return None
+    resolved = resolve_relative_location(conn, wa_id, raw, current_location_text=current_location_text)
+    if resolved:
+        return resolved
     prompt = _LOCATION_EXTRACT_PROMPT.format(text=raw)
     try:
         result = generate_model_text(prompt, temperature=0.1, max_tokens=60)
@@ -954,8 +1067,8 @@ def format_location_with_context(location):
     if updated_at:
         try:
             loc_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-            now_dt = datetime.now(timezone.utc)
-            days = (now_dt - loc_dt.astimezone(timezone.utc)).days
+            now_dt = hk_now()
+            days = (now_dt - loc_dt).days
             if days == 0:
                 suffix = "（今日）"
             elif days == 1:
@@ -974,11 +1087,18 @@ def format_location_with_context(location):
 def maybe_update_user_location(conn, wa_id, text):
     if not conn or not wa_id:
         return
-    detected = extract_location_from_text(text)
+    current = get_current_location(conn, wa_id)
+    detected = extract_location_from_text(
+        text,
+        wa_id=wa_id,
+        conn=conn,
+        current_location_text=(current or {}).get("content", ""),
+    )
     if not detected:
         return
-    current = get_current_location(conn, wa_id)
     if current and current.get("content") == detected:
+        return
+    if current and location_specificity_score(detected) < location_specificity_score(current.get("content", "")):
         return
     now = utc_now()
     try:
@@ -1371,10 +1491,46 @@ def detect_weather_day_offset(text):
     return 0
 
 
+def detect_history_day_offset(text):
+    value = clean_text(text)
+    if not value:
+        return None
+    if contains_any_keyword(value, ("大前天", "大前日", "大前晚")):
+        return 3
+    if contains_any_keyword(value, ("前天", "前日", "前晚", "前幾日", "前几日")):
+        return 2
+    if contains_any_keyword(value, ("昨天", "昨日", "昨晚", "噚日", "尋日", "噚晚", "尋晚", "琴日", "琴晚")):
+        return 1
+    if contains_any_keyword(value, ("今天", "今日", "而家", "依家", "宜家", "現在", "现在")):
+        return 0
+    return None
+
+
+def detect_history_target_date_str(text):
+    value = clean_text(text)
+    if not value:
+        return ""
+    explicit = re.search(r"(?<!\d)(\d{1,2})[./月\-](\d{1,2})(?:日|号|號)?(?!\d)", value)
+    if explicit:
+        month = int(explicit.group(1))
+        day = int(explicit.group(2))
+        year = hk_now().year
+        try:
+            return datetime(year, month, day, tzinfo=HK_TZ).strftime("%Y-%m-%d")
+        except Exception:
+            return ""
+    offset = detect_history_day_offset(value)
+    if offset is None:
+        return ""
+    return (hk_now() - timedelta(days=offset)).strftime("%Y-%m-%d")
+
+
 def is_weather_query(text):
     value = clean_text(text)
     if not value:
         return False
+    if detect_weather_day_offset(value) >= 0 and contains_any_keyword(value, ("度", "氣溫", "气温", "熱", "热", "凍", "冷", "雨", "晴", "多雲", "多云", "預報", "预报")):
+        return True
     return contains_any_keyword(value, WEATHER_QUERY_KEYWORDS)
 
 
@@ -1684,6 +1840,8 @@ def should_consider_live_search_router(text):
     lowered = value.lower()
     if any(alias.lower() in lowered for alias in SEARCH_ENTITY_ALIASES):
         return True
+    if contains_any_keyword(value, WEAK_REALTIME_HINTS):
+        return True
     return contains_any_keyword(value, ("係唔係", "是不是", "仲係唔係", "仲係", "仍然", "还在", "還在", "最新", "現時", "现时"))
 
 
@@ -1707,13 +1865,19 @@ def has_live_search_topic_clues(text):
         return True
     if contains_any_keyword(value, EXPLICIT_SEARCH_HINTS):
         return True
+    if contains_any_keyword(value, LIVE_SEARCH_TOPIC_HINTS):
+        return True
     lowered = value.lower()
     return any(alias.lower() in lowered for alias in SEARCH_ENTITY_ALIASES)
 
 
-def expand_live_search_followup_text(conn, wa_id, incoming_text, history_limit=8):
+def expand_live_search_followup_text(conn, wa_id, incoming_text, history_limit=20):
     value = clean_text(incoming_text)
-    if not conn or not wa_id or not looks_like_live_search_followup(value):
+    should_expand = looks_like_live_search_followup(value)
+    if not should_expand and contains_any_keyword(value, EXPLICIT_SEARCH_HINTS):
+        stripped_query = clean_text(extract_search_query(value, mode="web"))
+        should_expand = len(value) <= 10 or len(stripped_query) <= 6
+    if not conn or not wa_id or not should_expand:
         return value
 
     rows = conn.execute(
@@ -1742,7 +1906,7 @@ def extract_search_query(text, mode="web"):
     value = normalize_search_entities(text)
     patterns = [
         r"^(?:蘇蘇|苏苏|bb|老婆|寶寶|宝宝)?\s*(?:你知唔知|知唔知|你知不知道|知不知道|想問下|想問|想知|想知道)?\s*",
-        r"^(?:蘇蘇|苏苏|bb|老婆|寶寶|宝宝)?\s*(?:可唔可以|可不可以|可以|你可唔可以|你可以)?\s*(?:幫我|同我)?\s*(?:上網)?\s*(?:查下|查吓|查一查|搵下|搵吓|搜尋|搜索|search|lookup|google)\s*",
+        r"^(?:蘇蘇|苏苏|bb|老婆|寶寶|宝宝)?\s*(?:可唔可以|可不可以|可以|你可唔可以|你可以)?\s*(?:幫我|帮我|同我)?\s*(?:上網)?\s*(?:查下|查吓|查一查|查一下|查嘛|搵下|搵吓|搜尋|搜索|搜下|搜一下|搜嘛|search|lookup|google)\s*",
         r"^(?:蘇蘇|苏苏|bb|老婆|寶寶|宝宝)?\s*(?:你)?(?:幫我|帮我|同我)?\s*(?:睇下|睇睇|看一下|看一看|看看|看下)\s*",
     ]
     query = value
@@ -1807,30 +1971,27 @@ def build_music_search_query(query):
     return dedupe_search_terms(" ".join(parts))
 
 
-def route_live_search_with_model(incoming_text):
+def live_search_intent_gate(incoming_text):
     value = clean_text(incoming_text)
-    if not should_consider_live_search_router(value):
+    if not value:
         return {}
 
-    cache_key = ("live_search_router", value)
+    cache_key = ("live_search_intent", value)
 
     def _loader():
         hinted_mode = detect_live_search_mode(value) if (is_news_query(value) or is_music_query(value)) else "unknown"
         if is_weather_query(value):
             hinted_mode = "weather"
-        if hinted_mode == "weather":
-            hinted_query = dedupe_search_terms(value)
-        else:
-            hinted_query = extract_search_query(value, mode="music" if hinted_mode == "music" else "web")
+        hinted_query = extract_search_query(value, mode="music" if hinted_mode == "music" else "web")
         prompt = f"""
 用戶訊息：{value}
 目前香港時間：{hk_now().strftime('%Y-%m-%d %H:%M')}
 高概率類別：{hinted_mode}
 原句主體線索：{hinted_query}
 
-請判斷呢句需唔需要查即時外部資料；如果要，就回傳最適合搜尋嘅 mode 同 query。
-如果高概率類別已經係 news 或 music，除非非常明顯唔啱，否則應優先沿用。
-query 要保留主體人物 / 地點 / 品牌名，唔好只輸出日期或者泛詞。
+請判斷呢句需唔需要查即時外部資料；如果要，只回傳最適合搜尋嘅 mode。
+今次只做意圖判斷（L1），唔需要產生最終 query。
+你可以可選輸出 hint_query（粗略主體詞）俾下一層用，但唔好過長。
 """.strip()
         raw = generate_lightweight_router_text(prompt, system_prompt=LIVE_SEARCH_ROUTER_PROMPT)
         data = parse_json_object(raw)
@@ -1840,57 +2001,257 @@ query 要保留主體人物 / 地點 / 品牌名，唔好只輸出日期或者�
         mode = clean_text(data.get("mode")).lower()
         if mode not in {"weather", "news", "music", "web"}:
             mode = "none"
-        query = dedupe_search_terms(normalize_search_entities(data.get("query") or ""))
+        hint_query = dedupe_search_terms(normalize_search_entities(data.get("query") or data.get("hint_query") or ""))
         try:
             confidence = float(data.get("confidence", 0) or 0)
         except Exception:
             confidence = 0.0
+        reply_task_type = clean_text(data.get("reply_task_type")).lower()
+        if reply_task_type not in {"casual_chat", "realtime_query", "memory_recall", "context_followup", "task_help"}:
+            reply_task_type = "realtime_query" if should_search else "casual_chat"
         return {
             "should_search": should_search and mode in {"weather", "news", "music", "web"},
             "mode": mode,
-            "query": query,
+            "hint_query": hint_query,
+            "use_previous_context": bool(data.get("use_previous_context")),
+            "needs_history_recall": bool(data.get("needs_history_recall")),
+            "reply_task_type": reply_task_type,
             "confidence": max(0.0, min(confidence, 1.0)),
-            "source": "router",
+            "source": "router_intent",
         }
 
     try:
-        return cached_live_json(cache_key, _loader, ttl_seconds=LIVE_SEARCH_ROUTER_CACHE_SECONDS)
+        result = cached_live_json(cache_key, _loader, ttl_seconds=LIVE_SEARCH_ROUTER_CACHE_SECONDS)
+        if result:
+            return result
+        result = _loader()
+        if result:
+            return result
+    except Exception:
+        pass
+
+    if not should_consider_live_search_router(value):
+        return {}
+
+    hinted_mode = detect_live_search_mode(value) if (is_news_query(value) or is_music_query(value)) else "unknown"
+    if is_weather_query(value):
+        hinted_mode = "weather"
+    hinted_query = extract_search_query(value, mode="music" if hinted_mode == "music" else "web")
+    prompt = f"""
+用戶訊息：{value}
+目前香港時間：{hk_now().strftime('%Y-%m-%d %H:%M')}
+高概率類別：{hinted_mode}
+原句主體線索：{hinted_query}
+
+請判斷呢句需唔需要查即時外部資料；如果要，只回傳最適合搜尋嘅 mode。
+今次只做意圖判斷（L1），唔需要產生最終 query。
+你可以可選輸出 hint_query（粗略主體詞）俾下一層用，但唔好過長。
+""".strip()
+    try:
+        raw = generate_lightweight_router_text(prompt, system_prompt=LIVE_SEARCH_ROUTER_PROMPT)
+        data = parse_json_object(raw)
+        if not data:
+            return {}
+        should_search = bool(data.get("should_search"))
+        mode = clean_text(data.get("mode")).lower()
+        if mode not in {"weather", "news", "music", "web"}:
+            mode = "none"
+        hint_query = dedupe_search_terms(normalize_search_entities(data.get("query") or data.get("hint_query") or ""))
+        try:
+            confidence = float(data.get("confidence", 0) or 0)
+        except Exception:
+            confidence = 0.0
+        reply_task_type = clean_text(data.get("reply_task_type")).lower()
+        if reply_task_type not in {"casual_chat", "realtime_query", "memory_recall", "context_followup", "task_help"}:
+            reply_task_type = "realtime_query" if should_search else "casual_chat"
+        return {
+            "should_search": should_search and mode in {"weather", "news", "music", "web"},
+            "mode": mode,
+            "hint_query": hint_query,
+            "use_previous_context": bool(data.get("use_previous_context")),
+            "needs_history_recall": bool(data.get("needs_history_recall")),
+            "reply_task_type": reply_task_type,
+            "confidence": max(0.0, min(confidence, 1.0)),
+            "source": "router_intent_fallback",
+        }
     except Exception:
         return {}
 
 
-def build_live_search_plan(incoming_text):
-    router_plan = route_live_search_with_model(incoming_text)
-    if router_plan.get("should_search") and router_plan.get("mode") in {"weather", "news", "music", "web"}:
-        mode = router_plan["mode"]
-        query = router_plan.get("query") or ""
-        if mode == "weather":
-            query = dedupe_search_terms(query or clean_text(incoming_text))
-        elif mode == "news":
-            query = build_news_search_query(query or extract_search_query(incoming_text, mode=mode))
-        elif mode == "music":
-            query = build_music_search_query(query or extract_search_query(incoming_text, mode=mode))
-        else:
-            query = dedupe_search_terms(normalize_search_entities(query or extract_search_query(incoming_text, mode=mode)))
-        router_plan["query"] = query
-        return router_plan
-    if contains_any_keyword(incoming_text, EXPLICIT_SEARCH_HINTS):
-        mode = detect_live_search_mode(incoming_text)
-        if mode == "weather":
-            query = dedupe_search_terms(clean_text(incoming_text))
-        elif mode == "news":
-            query = build_news_search_query(extract_search_query(incoming_text, mode="web"))
-        elif mode == "music":
-            query = build_music_search_query(extract_search_query(incoming_text, mode="music"))
-        else:
-            query = dedupe_search_terms(normalize_search_entities(extract_search_query(incoming_text, mode="web")))
+def route_live_search_with_model(incoming_text):
+    intent = live_search_intent_gate(incoming_text)
+    if not intent:
+        return {}
+    return {
+        "should_search": bool(intent.get("should_search")),
+        "mode": clean_text(intent.get("mode")).lower(),
+        "query": clean_text(intent.get("hint_query")),
+        "confidence": float(intent.get("confidence", 0) or 0),
+        "source": clean_text(intent.get("source")) or "router_intent",
+    }
+
+
+def _best_location_alias_match(text, alias_map):
+    lowered = clean_text(text).lower()
+    best = (0, "", "")
+    for alias, canonical in alias_map.items():
+        if alias.lower() in lowered and len(alias) > best[0]:
+            best = (len(alias), alias, canonical)
+    if best[0] <= 0:
+        return None
+    return {"alias": best[1], "canonical": best[2]}
+
+
+def _extract_weather_city_candidate(text):
+    value = clean_text(text)
+    if not value:
+        return ""
+    candidate = normalize_search_entities(value)
+    for token in WEATHER_QUERY_KEYWORDS + (
+        "幫我", "帮我", "查", "查下", "查吓", "睇下", "看看", "search", "lookup", "而家", "依家", "宜家", "現在", "现在",
+        "今日", "今天", "明日", "聽日", "後日", "后天", "呢度", "呢邊", "这里", "那边", "個", "个", "的",
+    ):
+        candidate = candidate.replace(token, " ")
+    candidate = re.sub(r"[?？!！,，。;；:：]+", " ", candidate)
+    candidate = re.sub(r"\s+", " ", candidate).strip()
+    if len(candidate) < 2:
+        return ""
+    return candidate
+
+
+def extract_weather_slots(text, hint_query=""):
+    raw = clean_text(text)
+    hint = clean_text(hint_query)
+    base_text = " ".join(item for item in (raw, hint) if item)
+    hk_match = _best_location_alias_match(base_text, HK_LOCATION_ALIASES)
+    if hk_match:
         return {
+            "weather_source": "hk",
+            "location": hk_match["canonical"],
+            "city_query": hk_match["canonical"],
+            "needs_clarification": False,
+        }
+
+    cn_match = _best_location_alias_match(base_text, CN_CITY_ALIASES)
+    if cn_match:
+        canonical = clean_text(cn_match["canonical"])
+        if canonical in ("香港", "澳门"):
+            return {
+                "weather_source": "hk",
+                "location": "香港天文台" if canonical == "香港" else canonical,
+                "city_query": canonical,
+                "needs_clarification": False,
+            }
+        return {
+            "weather_source": "cn",
+            "location": canonical,
+            "city_query": canonical,
+            "needs_clarification": False,
+        }
+
+    if contains_any_keyword(base_text, HK_DEFAULT_LOCATION_HINTS):
+        return {
+            "weather_source": "hk",
+            "location": "香港天文台",
+            "city_query": "香港",
+            "needs_clarification": False,
+        }
+
+    candidate = _extract_weather_city_candidate(hint or raw)
+    if not candidate:
+        return {
+            "weather_source": "unknown",
+            "location": "",
+            "city_query": "",
+            "needs_clarification": True,
+        }
+
+    source = detect_weather_source(candidate)
+    needs_clar = (source == "overseas" and len(candidate) <= 2)
+    return {
+        "weather_source": source,
+        "location": candidate,
+        "city_query": candidate,
+        "needs_clarification": needs_clar,
+    }
+
+
+def extract_live_slots(mode, incoming_text, hint_query=""):
+    value = clean_text(incoming_text)
+    hint = clean_text(hint_query)
+    if mode == "weather":
+        slots = extract_weather_slots(value, hint_query=hint)
+        slots["mode"] = mode
+        return slots
+    if mode == "news":
+        topic = clean_text(hint) or extract_search_query(value, mode="web")
+        return {
+            "mode": mode,
+            "topic": topic,
+            "time_window": "1d" if is_news_query(value) else "",
+        }
+    if mode == "music":
+        subject = clean_text(hint) or extract_search_query(value, mode="music")
+        return {
+            "mode": mode,
+            "subject": subject,
+            "is_ranking": is_ranking_query(value),
+        }
+    subject = clean_text(hint) or extract_search_query(value, mode="web")
+    explicit_domains = extract_explicit_platform_domains(value)
+    return {
+        "mode": "web",
+        "subject": subject,
+        "domains": explicit_domains,
+    }
+
+
+def build_query_from_slots(mode, slots, incoming_text):
+    if mode == "weather":
+        return clean_text((slots or {}).get("city_query") or "")
+    if mode == "news":
+        topic = clean_text((slots or {}).get("topic")) or extract_search_query(incoming_text, mode="web")
+        return build_news_search_query(topic)
+    if mode == "music":
+        subject = clean_text((slots or {}).get("subject")) or extract_search_query(incoming_text, mode="music")
+        return build_music_search_query(subject)
+    subject = clean_text((slots or {}).get("subject")) or extract_search_query(incoming_text, mode="web")
+    return dedupe_search_terms(normalize_search_entities(subject))
+
+
+def build_live_search_plan(incoming_text, intent=None):
+    intent = intent or live_search_intent_gate(incoming_text)
+    if intent.get("should_search") and intent.get("mode") in {"weather", "news", "music", "web"}:
+        mode = intent["mode"]
+        slots = extract_live_slots(mode, incoming_text, hint_query=intent.get("hint_query") or "")
+        query = build_query_from_slots(mode, slots, incoming_text)
+        plan = {
             "should_search": True,
             "mode": mode,
             "query": query,
+            "slots": slots,
+            "confidence": float(intent.get("confidence", 0) or 0),
+            "source": clean_text(intent.get("source")) or "router_intent",
+        }
+        if mode == "weather" and (slots or {}).get("needs_clarification"):
+            plan["clarify_reply"] = "你想查邊個地方嘅天氣？例如香港、深圳或者東京。"
+        return plan
+
+    if contains_any_keyword(incoming_text, EXPLICIT_SEARCH_HINTS):
+        mode = detect_live_search_mode(incoming_text)
+        slots = extract_live_slots(mode, incoming_text, hint_query="")
+        query = build_query_from_slots(mode, slots, incoming_text)
+        plan = {
+            "should_search": True,
+            "mode": mode,
+            "query": query,
+            "slots": slots,
             "confidence": 0.35,
             "source": "explicit_fallback",
         }
+        if mode == "weather" and (slots or {}).get("needs_clarification"):
+            plan["clarify_reply"] = "你想查邊個地方嘅天氣？例如香港、深圳或者東京。"
+        return plan
     return None
 
 
@@ -2722,12 +3083,57 @@ def build_live_search_abstain_reply(mode, results, review_reason=""):
     return "bb 我而家搵到嘅結果仲未夠穩陣，所以唔想亂答住。"
 
 
-def fetch_live_search_results(mode, search_query, effective_text):
+def build_live_search_clarify_reply(mode, slots=None):
+    slots = slots or {}
+    if mode == "weather" and slots.get("needs_clarification"):
+        return "你想查邊個地方嘅天氣？例如香港、深圳或者東京。"
+    return "你想我查邊一方面嘅即時資料？"
+
+
+def validate_live_results(mode, slots, results):
+    slots = slots or {}
+    if not results:
+        return {
+            "ok": False,
+            "reason": "no_results",
+            "clarify_reply": build_live_search_clarify_reply(mode, slots) if mode == "weather" else "",
+        }
+
     if mode == "weather":
-        source = detect_weather_source(effective_text)
+        snippet = clean_text((results[0] or {}).get("snippet"))
+        if not snippet:
+            return {
+                "ok": False,
+                "reason": "missing_weather_snippet",
+                "clarify_reply": build_live_search_clarify_reply(mode, slots),
+            }
+        if not contains_any_keyword(snippet, ("天氣", "氣溫", "濕度", "度", "雨", "晴", "多雲", "雷", "風")):
+            return {
+                "ok": False,
+                "reason": "insufficient_weather_signal",
+                "clarify_reply": build_live_search_clarify_reply(mode, slots),
+            }
+        return {"ok": True, "reason": ""}
+
+    top = results[0] or {}
+    title = clean_text(top.get("title"))
+    url = clean_text(top.get("url"))
+    if not title or not url:
+        return {"ok": False, "reason": "missing_title_or_url", "clarify_reply": ""}
+    return {"ok": True, "reason": ""}
+
+
+def fetch_live_search_results(mode, search_query, effective_text, slots=None):
+    slots = slots or {}
+    if mode == "weather":
+        source = clean_text(slots.get("weather_source")) or detect_weather_source(effective_text)
         now_str = hk_now().strftime("%Y-%m-%d %H:%M")
         if source == "hk":
-            weather_summary = build_live_weather_reply(effective_text)
+            weather_text = clean_text(effective_text)
+            hk_location = clean_text(slots.get("location"))
+            if hk_location and hk_location not in weather_text:
+                weather_text = f"{hk_location} 天氣"
+            weather_summary = build_live_weather_reply(weather_text)
             if not weather_summary:
                 return []
             return [
@@ -2740,10 +3146,10 @@ def fetch_live_search_results(mode, search_query, effective_text):
                 }
             ]
         if source == "cn":
-            city = clean_text(effective_text).strip()
+            city = clean_text(slots.get("city_query") or search_query).strip()
             if not city or not OPENWEATHER_API_KEY:
                 return []
-            ow_data = search_openweather(city)
+            ow_data = search_openweather(city, country_code="CN")
             if not ow_data:
                 return []
             summary = format_openweather(ow_data)
@@ -2759,10 +3165,8 @@ def fetch_live_search_results(mode, search_query, effective_text):
                 }
             ]
         if source == "overseas":
-            city = clean_text(effective_text).strip()
-            if not city:
-                return []
-            if not OPENWEATHER_API_KEY:
+            city = clean_text(slots.get("city_query") or search_query).strip()
+            if not city or not OPENWEATHER_API_KEY:
                 return []
             ow_data = search_openweather(city)
             if not ow_data:
@@ -2879,9 +3283,13 @@ def normalize_live_search_reply(reply):
 
     text = "\n".join(normalized_lines)
     if len(normalized_lines) >= 3:
-        text = "；".join(normalized_lines).strip()
+        text = " ".join(normalized_lines).strip()
     text = re.sub(r"([：:])\s*\n+", r"\1 ", text)
     text = re.sub(r"\n{2,}", "\n", text)
+    text = re.sub(r"^[；;\s]+", "", text)
+    text = re.sub(r"[；;]{2,}", "；", text)
+    text = re.sub(r"\s*[；;]\s*", "，", text)
+    text = re.sub(r"，{2,}", "，", text)
     text = text.strip()
     if text.endswith(("：", ":")):
         text = text[:-1].rstrip(" ，。；、")
@@ -2951,15 +3359,66 @@ def build_live_search_reply(incoming_text, conn=None, wa_id=""):
     plan = build_live_search_plan(effective_text)
     if not plan or not plan.get("should_search"):
         return None
+    if clean_text(plan.get("clarify_reply")):
+        return clean_text(plan.get("clarify_reply"))
 
     mode = plan.get("mode") or "web"
     search_query = clean_text(plan.get("query"))
+    slots = plan.get("slots") or {}
+    if anthropic_gateway_enabled() and ANTHROPIC_WEB_SEARCH_ENABLED:
+        extra_context_line = ""
+        if clean_text(effective_text) != clean_text(incoming_text):
+            extra_context_line = f"補充上下文：{clean_text(effective_text)}\n"
+        search_guidance = "如果需要最新、即時或可查證資料，你可以自己決定用 web search。"
+        if mode == "weather":
+            search_guidance = "呢題係天氣／預報問題，你應該先用 web search 查可驗證來源，再直接答溫度、天氣或降雨重點。"
+        elif mode == "news":
+            search_guidance = "呢題係新聞／最新動態問題，你應該先用 web search 查來源，再直接總結重點。"
+        elif mode in {"music", "web"}:
+            search_guidance = "如果題目涉及最近、最新、近況、更新或可查證資料，你應該先用 web search 再答。"
+        prompt = f"""
+用戶剛剛問：{clean_text(incoming_text)}
+{extra_context_line}目前香港時間：{hk_now().strftime('%Y-%m-%d %H:%M')}
+
+回覆要求：
+- {search_guidance}
+- 用繁體港式廣東話，似自然 WhatsApp
+- 先直接答用戶最想知嘅重點
+- 如果搵到具體數字、日期、溫度或時間，要直接講出嚟，唔好只講查唔查到
+- 如果查到多個來源，優先用最直接、最可信、最接近問題嘅答案
+- 只有喺真係搵唔到答案時，先講未夠資料，唔好太快放棄
+- 可以好短，但要完整
+- 唔好用逐行清單、項目符號，盡量用 1 到 2 句自然講完
+- 如有引用來源，將來源自然融入句子
+""".strip()
+        try:
+            reply = shorten_whatsapp_reply(
+                normalize_live_search_reply(
+                    call_anthropic_native_model(
+                        effective_text,
+                        model=ANTHROPIC_MODEL,
+                        temperature=0.15,
+                        max_tokens=320,
+                        system_prompt=prompt,
+                        use_web_search=True,
+                    )
+                ),
+                night_mode=is_night_mode(),
+            )
+            if reply:
+                return reply
+        except Exception:
+            pass
     try:
-        results = fetch_live_search_results(mode, search_query, effective_text)
+        results = fetch_live_search_results(mode, search_query, effective_text, slots=slots)
     except Exception:
         return "我啱啱上網查資料嗰下失敗咗，未夠把握就唔想亂答，你隔一陣再問我一次好唔好？"
 
-    if not results:
+    validation = validate_live_results(mode, slots, results)
+    if not validation.get("ok"):
+        clarify_reply = clean_text(validation.get("clarify_reply"))
+        if clarify_reply:
+            return clarify_reply
         return "我啱啱上網幫你搵過，但暫時未見到夠準嘅結果，要唔要你換個講法我再查？"
 
     if mode in {"news", "music", "web"}:
@@ -2969,17 +3428,18 @@ def build_live_search_reply(incoming_text, conn=None, wa_id=""):
             if refined_query and refined_query != search_query:
                 search_query = refined_query
                 try:
-                    results = fetch_live_search_results(mode, search_query, effective_text)
+                    results = fetch_live_search_results(mode, search_query, effective_text, slots=slots)
                 except Exception:
                     return "我啱啱上網查資料嗰下失敗咗，未夠把握就唔想亂答，你隔一陣再問我一次好唔好？"
-                if not results:
+                validation = validate_live_results(mode, slots, results)
+                if not validation.get("ok"):
                     return "我啱啱上網幫你搵過，但暫時未見到夠準嘅結果，要唔要你換個講法我再查？"
                 review = review_live_search_results(incoming_text, effective_text, mode, search_query, results)
         if review.get("decision") == "abstain":
             music_chart_guard_reply = build_music_chart_guard_reply(effective_text, results)
             if music_chart_guard_reply:
                 return music_chart_guard_reply
-            return build_live_search_abstain_reply(mode, results, review_reason=review.get("reason"))
+            return build_live_search_abstain_reply(mode, results, review_reason=clean_text(review.get("reason")))
 
     music_chart_guard_reply = build_music_chart_guard_reply(effective_text, results)
     if music_chart_guard_reply:
@@ -3014,10 +3474,11 @@ def build_live_search_reply(incoming_text, conn=None, wa_id=""):
 回覆要求：
 - 先直接答用戶最想知嘅重點
 - 只可以根據以上搜尋結果內容
-- 如果係天氣 / 即時資料，直接用自然口吻講清楚重點，似蘇蘇真係幫佢查完再覆
+- 如果係天氣 / 即時資料，直接用自然口吻同用戶講清楚重點，似蘇蘇真係幫你查完再覆
 - 如果用戶問「邊首好聽」呢類主觀問題，先講客觀可驗證部分，例如最新發行或者最近多來源提到嘅歌名，再清楚講明你只係按搜尋結果推斷
 - 如果結果未夠直接回答，就講暫時見到嘅結果未夠準
 - 用繁體港式廣東話，似自然 WhatsApp
+- 直接對住用戶講，用「你」唔好叫對方做「佢」
 - 可以好短，但要完整
 - 唔好用逐行清單、項目符號，盡量用 1 到 2 句自然講完；如果真係要提幾個結果，都寫成同一句入面
 - 唔好用「見到嘅係：」之後另起多行但冇內容
@@ -3303,6 +3764,7 @@ def get_db():
         ON wa_proactive_events (wa_id, outcome, created_at DESC)
         """
     )
+    ensure_archive_schema(conn)
     archive_expired_session_memories(conn)
     conn.commit()
     return conn
@@ -3782,6 +4244,8 @@ def enrich_rows_with_quote_context(conn, wa_id, rows):
         quoted_row = quoted_lookup.get(quoted_message_id)
         if quoted_row:
             item["quoted_preview"] = format_quoted_message_preview(quoted_row)
+            item["quoted_body"] = clean_text(quoted_row.get("body", ""))
+            item["quoted_direction"] = clean_text(quoted_row.get("direction", ""))
         else:
             item["quoted_preview"] = "較早訊息"
     return items
@@ -3990,16 +4454,16 @@ def recent_bucket_hours(bucket):
 
 
 def short_term_expiry(observed_at):
-    observed = parse_iso_dt(observed_at) or datetime.now(timezone.utc)
-    return observed.astimezone(timezone.utc) + timedelta(hours=SHORT_TERM_MEMORY_RETENTION_HOURS)
+    observed = parse_iso_dt(observed_at) or hk_now()
+    return observed + timedelta(hours=SHORT_TERM_MEMORY_RETENTION_HOURS)
 
 
 def current_recent_bucket(observed_at, now=None):
     observed = parse_iso_dt(observed_at)
     if not observed:
         return "within_7d"
-    now_utc = (now or hk_now()).astimezone(timezone.utc)
-    age = now_utc - observed.astimezone(timezone.utc)
+    now_hk = now or hk_now()
+    age = now_hk - observed
     if age <= timedelta(hours=24):
         return "within_24h"
     if age <= timedelta(hours=72):
@@ -4058,8 +4522,8 @@ def classify_recent_memory_bucket(text, observed_at=None, now=None):
         return "within_7d"
     parsed = parse_iso_dt(observed_at)
     if parsed:
-        now_utc = (now or hk_now()).astimezone(timezone.utc)
-        age = now_utc - parsed.astimezone(timezone.utc)
+        now_hk = now or hk_now()
+        age = now_hk - parsed
         if age <= timedelta(hours=24):
             return "within_24h"
         if age <= timedelta(hours=72):
@@ -4071,7 +4535,7 @@ def infer_observed_at_from_text(text, now=None):
     value = clean_text(text)
     if not value:
         return None
-    now_utc = (now or hk_now()).astimezone(timezone.utc)
+    now_hk = now or hk_now()
     shift_days = 0
 
     PAST_MARKERS = {
@@ -4105,7 +4569,7 @@ def infer_observed_at_from_text(text, now=None):
     if shift_days == 0:
         return None
 
-    return (now_utc - timedelta(days=shift_days)).astimezone(timezone.utc)
+    return (now_hk - timedelta(days=shift_days))
 
 
 def is_recent_memory_candidate(text):
@@ -4145,8 +4609,8 @@ def normalize_recent_memory_rows(conn):
     ).fetchall()
     for row in rows:
         bucket = normalize_recent_bucket(row["bucket"])
-        observed = parse_iso_dt(row["observed_at"] or row["updated_at"]) or datetime.now(timezone.utc)
-        observed_text = observed.astimezone(timezone.utc).isoformat()
+        observed = parse_iso_dt(row["observed_at"] or row["updated_at"]) or hk_now()
+        observed_text = observed.isoformat()
         expires_text = short_term_expiry(observed_text).isoformat()
         scoped_key = f"{bucket}:{normalize_key(row['content'])}"
         if (
@@ -4166,7 +4630,7 @@ def normalize_recent_memory_rows(conn):
 
 
 def archive_expired_session_memories(conn, now=None):
-    now_utc = (now or hk_now()).astimezone(timezone.utc)
+    now_hk = now or hk_now()
     rows = conn.execute(
         """
         SELECT id, wa_id, content, memory_key, bucket, observed_at, updated_at, expires_at
@@ -4174,7 +4638,7 @@ def archive_expired_session_memories(conn, now=None):
         WHERE expires_at != '' AND expires_at <= ?
         ORDER BY observed_at ASC, id ASC
         """,
-        (now_utc.isoformat(),),
+        (now_hk.isoformat(),),
     ).fetchall()
     for row in rows:
         content = clean_text(row["content"])
@@ -4182,8 +4646,8 @@ def archive_expired_session_memories(conn, now=None):
         if not content or not archive_key:
             conn.execute("DELETE FROM wa_session_memories WHERE id = ?", (row["id"],))
             continue
-        observed = parse_iso_dt(row["observed_at"] or row["updated_at"]) or now_utc
-        observed_text = observed.astimezone(timezone.utc).isoformat()
+        observed = parse_iso_dt(row["observed_at"] or row["updated_at"]) or now_hk
+        observed_text = observed.isoformat()
         updated_text = clean_text(row["updated_at"]) or observed_text
         conn.execute(
             """
@@ -4204,7 +4668,7 @@ def archive_expired_session_memories(conn, now=None):
                 normalize_recent_bucket(row["bucket"]),
                 observed_text,
                 updated_text,
-                now_utc.isoformat(),
+                now_hk.isoformat(),
             ),
         )
         conn.execute("DELETE FROM wa_session_memories WHERE id = ?", (row["id"],))
@@ -4311,7 +4775,7 @@ def load_archived_memory_rows(conn, wa_id, limit=4, query_text=""):
         if score <= 0:
             continue
         observed = parse_iso_dt(row.get("observed_at") or row.get("updated_at"))
-        scored.append((score, observed or datetime.min.replace(tzinfo=timezone.utc), row))
+        scored.append((score, observed or datetime.min.replace(tzinfo=HK_TZ), row))
 
     if not scored:
         return rows[:limit]
@@ -4382,7 +4846,7 @@ def count_inbound_messages(conn, wa_id):
 
 def count_proactive_for_service_day(conn, wa_id, now=None):
     now = now or hk_now()
-    start_text = service_day_start(now).astimezone(timezone.utc).isoformat()
+    start_text = service_day_start(now).isoformat()
     row = conn.execute(
         """
         SELECT COUNT(*) AS total
@@ -4464,7 +4928,7 @@ def bump_proactive_slot_outcome(conn, wa_id, slot_key, success):
 def finalize_stale_proactive_events(conn, wa_id=None):
     settings = get_runtime_settings()
     reply_window_minutes = int(settings["proactive_reply_window_minutes"])
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=reply_window_minutes)).isoformat()
+    cutoff = (hk_now() - timedelta(minutes=reply_window_minutes)).isoformat()
     sql = """
         SELECT id, wa_id, slot_key
         FROM wa_proactive_events
@@ -4605,13 +5069,13 @@ def upsert_session_memory(conn, wa_id, content, bucket="within_7d", ttl_hours=No
     if not key:
         return False
     bucket = normalize_recent_bucket(bucket)
-    observed = parse_iso_dt(observed_at) or datetime.now(timezone.utc)
-    now = datetime.now(timezone.utc)
+    observed = parse_iso_dt(observed_at) or hk_now()
+    now = hk_now()
     if ttl_hours is None:
         ttl_hours = SHORT_TERM_MEMORY_RETENTION_HOURS
     scoped_key = f"{bucket}:{key}"
-    expires_at_text = (observed.astimezone(timezone.utc) + timedelta(hours=ttl_hours)).isoformat()
-    observed_at_text = observed.astimezone(timezone.utc).isoformat()
+    expires_at_text = (observed + timedelta(hours=ttl_hours)).isoformat()
+    observed_at_text = observed.isoformat()
     now_text = clean_text(updated_at_text) or now.isoformat()
     conn.execute(
         """
@@ -4758,10 +5222,21 @@ def parse_json_object(raw_text):
     end = text.rfind("}")
     if start == -1 or end == -1 or end <= start:
         return {}
+    candidate = text[start : end + 1]
     try:
-        data = json.loads(text[start : end + 1])
+        data = json.loads(candidate)
     except json.JSONDecodeError:
-        return {}
+        repaired = candidate
+        repaired = re.sub(r"([\{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', repaired)
+        repaired = repaired.replace("'", '"')
+        repaired = re.sub(r"\bTrue\b", "true", repaired)
+        repaired = re.sub(r"\bFalse\b", "false", repaired)
+        repaired = re.sub(r"\bNone\b", "null", repaired)
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        try:
+            data = json.loads(repaired)
+        except json.JSONDecodeError:
+            return {}
     return data if isinstance(data, dict) else {}
 
 
@@ -4798,6 +5273,19 @@ def heuristic_extract_memories(incoming_text):
     return []
 
 
+def build_relay_headers(api_key):
+    headers = {"Content-Type": "application/json"}
+    auth_header = RELAY_AUTH_HEADER or "Authorization"
+    auth_token = RELAY_AUTH_TOKEN or (f"Bearer {api_key}" if api_key else "")
+    if auth_header and auth_token:
+        headers[auth_header] = auth_token
+    if RELAY_EXTRA_AUTH_HEADER and RELAY_EXTRA_AUTH_TOKEN:
+        headers[RELAY_EXTRA_AUTH_HEADER] = RELAY_EXTRA_AUTH_TOKEN
+    if RELAY_USER_AGENT:
+        headers["User-Agent"] = RELAY_USER_AGENT
+    return headers
+
+
 def call_openai_compatible(prompt_text, api_key, model, base_url, temperature=0.82, max_tokens=220, system_prompt=None, image_inputs=None):
     effective_system_prompt = system_prompt or get_runtime_settings()["system_persona"]
     user_content = prompt_text
@@ -4824,10 +5312,7 @@ def call_openai_compatible(prompt_text, api_key, model, base_url, temperature=0.
     request = Request(
         f"{base_url.rstrip('/')}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=build_relay_headers(api_key),
         method="POST",
     )
     with urlopen(request, timeout=40) as response:
@@ -4837,6 +5322,118 @@ def call_openai_compatible(prompt_text, api_key, model, base_url, temperature=0.
     if not choices:
         return ""
     return ((choices[0] or {}).get("message") or {}).get("content", "").strip()
+
+
+def router_enabled():
+    return bool(ROUTER_ENABLED and ROUTER_API_KEY and ROUTER_MODEL)
+
+
+def call_minimax_router_native(prompt_text, system_prompt=None, max_tokens=220):
+    effective_system_prompt = system_prompt or LIVE_SEARCH_ROUTER_PROMPT
+    payload = {
+        "model": ROUTER_MODEL,
+        "messages": [
+            {"role": "system", "name": "Susu Router", "content": effective_system_prompt},
+            {"role": "user", "name": "用户", "content": prompt_text},
+        ],
+        "tokens_to_generate": max_tokens,
+        "temperature": 0.0,
+    }
+    request = Request(
+        f"{ROUTER_BASE_URL.rstrip('/')}/v1/text/chatcompletion_v2",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {ROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=40) as response:
+        raw = response.read().decode("utf-8")
+        data = json.loads(raw) if raw else {}
+    base_resp = data.get("base_resp") or {}
+    status_code = int(base_resp.get("status_code", 0) or 0)
+    if status_code != 0:
+        raise RuntimeError(clean_text(base_resp.get("status_msg")) or f"minimax_router_{status_code}")
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    return clean_text(((choices[0] or {}).get("message") or {}).get("content", ""))
+
+
+def anthropic_gateway_enabled():
+    return bool(ANTHROPIC_GATEWAY_BASE_URL and ANTHROPIC_GATEWAY_TOKEN and ANTHROPIC_MODEL)
+
+
+def build_anthropic_headers():
+    return {
+        "cf-aig-authorization": f"Bearer {ANTHROPIC_GATEWAY_TOKEN}",
+        "anthropic-version": ANTHROPIC_VERSION,
+        "Content-Type": "application/json",
+        "User-Agent": ANTHROPIC_USER_AGENT,
+    }
+
+
+def build_anthropic_user_content(prompt_text, image_inputs=None):
+    if not image_inputs:
+        return prompt_text
+    user_content = [{"type": "text", "text": prompt_text}]
+    for item in image_inputs:
+        user_content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": item["mime_type"],
+                    "data": item["data_b64"],
+                },
+            }
+        )
+    return user_content
+
+
+def extract_anthropic_text(content_blocks):
+    parts = []
+    for block in content_blocks or []:
+        if (block or {}).get("type") == "text":
+            text = clean_text((block or {}).get("text"))
+            if text:
+                parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def call_anthropic_native_model(prompt_text, model, temperature=0.82, max_tokens=220, system_prompt=None, image_inputs=None, use_web_search=False):
+    effective_system_prompt = system_prompt or get_runtime_settings()["system_persona"]
+    payload = {
+        "model": model,
+        "system": effective_system_prompt,
+        "messages": [
+            {
+                "role": "user",
+                "content": build_anthropic_user_content(prompt_text, image_inputs=image_inputs),
+            }
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if use_web_search and ANTHROPIC_WEB_SEARCH_ENABLED:
+        payload["tools"] = [
+            {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": ANTHROPIC_WEB_SEARCH_MAX_USES,
+            }
+        ]
+    request = Request(
+        f"{ANTHROPIC_GATEWAY_BASE_URL.rstrip('/')}/messages",
+        data=json.dumps(payload).encode("utf-8"),
+        headers=build_anthropic_headers(),
+        method="POST",
+    )
+    with urlopen(request, timeout=90) as response:
+        raw = response.read().decode("utf-8")
+        data = json.loads(raw) if raw else {}
+    return extract_anthropic_text(data.get("content") or [])
 
 
 def call_relay_model(model_name, prompt_text, temperature=0.82, max_tokens=220, system_prompt=None, image_inputs=None):
@@ -4906,6 +5503,24 @@ def generate_model_text(prompt_text, temperature=0.82, max_tokens=220, system_pr
         except Exception as exc:
             errors.append(f"relay_failed:{type(exc).__name__}")
 
+    if anthropic_gateway_enabled():
+        try:
+            return call_anthropic_native_model(
+                prompt_text,
+                model=ANTHROPIC_MODEL,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+                image_inputs=image_inputs,
+                use_web_search=False,
+            )
+        except HTTPError as exc:
+            errors.append(f"anthropic_http_{exc.code}")
+            if exc.code not in (401, 403, 429, 500, 502, 503, 504):
+                raise
+        except Exception as exc:
+            errors.append(f"anthropic_failed:{type(exc).__name__}")
+
     if errors:
         raise RuntimeError(";".join(errors))
     return ""
@@ -4914,6 +5529,12 @@ def generate_model_text(prompt_text, temperature=0.82, max_tokens=220, system_pr
 def generate_lightweight_router_text(prompt_text, system_prompt=None):
     errors = []
     relay_primary, _ = get_relay_model_order()
+
+    if router_enabled():
+        try:
+            return call_minimax_router_native(prompt_text, system_prompt=system_prompt, max_tokens=220)
+        except Exception as exc:
+            errors.append(f"router_minimax_failed:{type(exc).__name__}")
 
     if RELAY_API_KEY and relay_primary:
         try:
@@ -5107,7 +5728,7 @@ def maybe_extract_memories(conn, wa_id, profile_name, incoming_text):
     # extracted items are dicts {content, importance} or plain strings (fallback)
     extracted = []
     try:
-        raw = generate_model_text(prompt, temperature=0.2, max_tokens=240, system_prompt=MEMORY_EXTRACTOR_PROMPT)
+        raw = generate_lightweight_router_text(prompt, system_prompt=MEMORY_EXTRACTOR_PROMPT)
         for item in parse_json_array(raw):
             if isinstance(item, dict):
                 text = clean_text(item.get("content", ""))
@@ -5189,77 +5810,448 @@ def heuristic_extract_session_memories(incoming_text):
     return deduped[:4]
 
 
-def maybe_extract_session_memories(conn, wa_id, incoming_text):
-    with _session_extraction_locks_lock:
-        lock = _session_extraction_locks.setdefault(wa_id, threading.Lock())
-    acquired = lock.acquire(blocking=False)
-    if not acquired:
-        return []
-    try:
-        existing_rows = conn.execute(
-            "SELECT content, bucket FROM wa_session_memories WHERE wa_id = ? LIMIT 30",
-            (wa_id,),
-        ).fetchall()
-        existing_texts = "\n".join(
-            f'- "{clean_text(r["content"])}"'
-            for r in existing_rows
-        ) if existing_rows else "（暫時未有短期記憶）"
+def _get_log_date(observed):
+    """03:59 边界：凌晨4点前的事件归入昨天"""
+    if observed is None:
+        return hk_today().isoformat()
+    if hasattr(observed, 'hour'):
+        if observed.hour < 4:
+            observed -= timedelta(days=1)
+        return observed.strftime("%Y-%m-%d")
+    return hk_today().isoformat()
 
-        prompt = f"""
+
+def _date_offset(date_str, days):
+    """返回 date_str +/- days 的 YYYY-MM-DD 字符串"""
+    d = datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=days)
+    return d.strftime("%Y-%m-%d")
+
+
+def upsert_daily_log(conn, wa_id, date_str, new_sentence, logged_at=None):
+    """追加句子到当日日志，按句去重。每条带时间码 HH:MM"""
+    key = f"daily:{date_str}"
+    time_code = logged_at or hk_now().strftime("%H:%M")
+    new = f"{time_code} {new_sentence.rstrip('。')}"
+    conn.row_factory = sqlite3.Row
+
+    row = conn.execute(
+        "SELECT id, content, memory_key FROM wa_session_memories WHERE wa_id=? AND (memory_key=? OR memory_key LIKE ?)",
+        (wa_id, key, f"daily:{date_str}%"),
+    ).fetchone()
+
+    if row:
+        existing = row["content"] or ""
+        lines = [l.rstrip("。") for l in existing.split("。") if l.strip()]
+        if new in lines:
+            return False
+        updated = existing.rstrip("。") + "。" + new
+        conn.execute(
+            "UPDATE wa_session_memories SET content=?, updated_at=?, bucket='daily_log', memory_key=? WHERE id=?",
+            (updated, utc_now(), key, row["id"]),
+        )
+    else:
+        expires = (datetime.fromisoformat(f"{date_str}T04:00:00").replace(tzinfo=HK_TZ) + timedelta(days=7)).isoformat()
+        conn.execute(
+            "INSERT INTO wa_session_memories (wa_id, content, memory_key, bucket, observed_at, updated_at, expires_at) "
+            "VALUES (?, ?, ?, 'daily_log', ?, ?, ?)",
+            (wa_id, new, key, date_str + "T04:00:00+08:00", hk_now().isoformat(), expires),
+        )
+    return True
+
+
+def promote_to_long_term(conn, wa_id, content):
+    """Promote 到长期记忆，相似内容去重"""
+    if not content or len(content.strip()) < 4:
+        return
+    text = clean_text(content)
+    if not should_promote_to_long_term(text):
+        return
+    existing = load_memories(conn, wa_id)
+    for row in existing:
+        if _texts_similar(text, row["content"], threshold=0.65):
+            return
+    upsert_memory(conn, wa_id, text, importance=3)
+
+
+def _texts_similar(a, b, threshold=0.6):
+    """简单文本相似度：基于词集合交集"""
+    words_a = set(re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z0-9]+", a.lower()))
+    words_b = set(re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z0-9]+", b.lower()))
+    if not words_a or not words_b:
+        return False
+    intersection = len(words_a & words_b)
+    union = len(words_a | words_b)
+    return (intersection / union) >= threshold if union > 0 else False
+
+
+def should_promote_to_long_term(content):
+    text = clean_text(content)
+    if not text:
+        return False
+    stable_markers = (
+        "鍾意", "喜欢", "希望", "討厭", "讨厌", "用緊", "用着", "學識", "学会", "識揸車", "会开车",
+        "有爺爺奶奶", "有爷爷奶奶", "有太奶", "有曾祖母", "住喺", "住在", "開始玩", "开始玩",
+        "叫AI做", "叫ai做", "偏好", "習慣", "习惯",
+    )
+    ephemeral_markers = (
+        "今日", "今天", "噚日", "尋日", "昨天", "昨日", "前天", "前日", "中午", "今晚", "昨晚", "尋晚", "噚晚",
+        "而家", "依家", "现在", "目前", "放假期", "外地", "長嶺", "长岭", "太平山鎮", "太平山镇",
+        "闖了紅燈", "闯了红灯", "白酒", "聚餐", "食飯", "吃饭", "deadline", "作業", "作业",
+    )
+    if any(marker in text for marker in stable_markers):
+        return True
+    if any(marker in text for marker in ephemeral_markers):
+        return False
+    if re.search(r"\b(明天|明日|后天|後日|今天|今日|昨天|昨日)\b", text):
+        return False
+    return False
+
+
+def maybe_extract_session_memories(conn, wa_id, incoming_text):
+    existing_rows = conn.execute(
+        "SELECT content, memory_key FROM wa_session_memories WHERE wa_id = ? AND (bucket = 'daily_log' OR memory_key LIKE 'daily:%') ORDER BY observed_at DESC LIMIT 30",
+        (wa_id,),
+    ).fetchall()
+    existing_texts = "\n".join(
+        f'- "{clean_text(r["content"])}"'
+        for r in existing_rows
+    ) if existing_rows else "（暫時未有短期記憶）"
+
+    today_str = hk_today().isoformat()
+    prompt = f"""
 對方剛剛講：
 {clean_text(incoming_text)}
 
-已有短期記憶（請唔好重複）：
+已有每日日志（請唔好重複）：
 {existing_texts}
 
-請抽取值得保留嘅短期記憶。輸出 JSON array，每項格式：
-{{"content": "記憶內容", "bucket": "within_24h|within_3d|within_7d"}}
+請抽取值得保留嘅每日日志內容。只要係近期、有資訊量、之後可能用得着嘅近況或事件，都可以記低。輸出 JSON array，每項格式：
+{{"content": "事件描述", "observed_at": "YYYY-MM-DD"}}
 
-時間詞 → bucket 對照：
-- within_24h：頭先、啱啱、今日（事件發生在今日）、今晚、今朝
-- within_3d：尋晚、昨日、聽日、明天、後天、呢兩三日
-- within_7d：最近、近排、今個星期、最近幾日、最近嘅短期計劃或任務
+⚠️ 03:59 边界：凌晨 4 點前的事件歸入昨天。
 
-⚠️ 重要：時間詞指嘅係「事件發生嘅時間」，唔係「對方講呢句說話嘅時間」！
-- 「昨天吃了包子」→ 事件發生喺昨天 → bucket = within_3d
-- 「今日約咗朋友」→ 事件發生喺今日 → bucket = within_24h
-- 「聽日考試」→ 事件發生喺明天 → bucket = within_3d
+時間詞 → 日期：
+- 頭先、啱啱、今日、今晚 → 今天（{today_str}）
+- 尋晚、昨晚、昨日 → {_date_offset(today_str, -1)}
+- 聽日、明天 → {_date_offset(today_str, 1)}
+- 後天 → {_date_offset(today_str, 2)}
+
+⚠️ 時間詞指嘅係「事件發生嘅時間」，唔係「對方講呢句說話嘅時間」！
+- 「昨晚吃了包子」→ observed_at = {_date_offset(today_str, -1)}
+- 「今日约咗朋友」→ observed_at = {today_str}
+- 「聽日考試」→ observed_at = {_date_offset(today_str, 1)}
 
 唔好抽取：
-- 長期背景、長期偏好、長期習慣（呢啲係長期記憶嘅範疇）
-- 冇資訊量嘅撒嬌、純情緒、客套句
+- 長期背景、長期偏好、長期習慣
+- 冇資訊量嘅撒嬌、純情緒、純客套句
 - 太私密或太敏感嘅細節
-- 已經喺上面已有短期記憶入面嘅內容
+- 已經喺上面已有日志入面嘅內容
+- 問答式對話內容（蘇蘇問問題、對方回答呢種互動唔需要記）
+- 蘇蘇問嘅問題、蘇蘇話嘅句子
 
-最多 4 項。如果冇值得記嘅就輸出 []。
+如果冇值得記嘅就輸出 []。
 """.strip()
 
+    extracted = []
+    try:
+        raw = generate_lightweight_router_text(prompt, system_prompt=RECENT_MEMORY_EXTRACTOR_PROMPT)
+        for item in parse_json_array(raw):
+            if not isinstance(item, dict):
+                continue
+            content = clean_text(item.get("content"))
+            if not content or len(content) < 4:
+                continue
+            raw_date = item.get("observed_at")
+            if raw_date:
+                log_date, observed = parse_log_date_hint(raw_date, fallback_date=today_str)
+            else:
+                observed = infer_observed_at_from_text(content)
+                log_date = _get_log_date(observed) if observed else today_str
+            extracted.append({"content": content, "log_date": log_date})
+    except Exception:
         extracted = []
-        try:
-            raw = generate_model_text(prompt, temperature=0.15, max_tokens=280, system_prompt=RECENT_MEMORY_EXTRACTOR_PROMPT)
-            for item in parse_json_array(raw):
-                if not isinstance(item, dict):
-                    continue
-                content = clean_text(item.get("content"))
-                bucket = normalize_recent_bucket(item.get("bucket"))
-                if is_recent_memory_candidate(content):
-                    observed_at = infer_observed_at_from_text(content)
-                    extracted.append({"bucket": bucket, "content": content, "observed_at": observed_at})
-        except Exception:
-            extracted = []
 
-        if not extracted:
-            extracted = heuristic_extract_session_memories(incoming_text)
+    if not extracted:
+        for item in heuristic_extract_session_memories(incoming_text):
+            content = clean_text(item.get("content"))
+            if not content:
+                continue
+            observed = item.get("observed_at") or infer_observed_at_from_text(content)
+            log_date = _get_log_date(observed) if observed else today_str
+            extracted.append({"content": content, "log_date": log_date})
 
-        saved = []
-        for item in extracted:
-            if upsert_session_memory(conn, wa_id, item["content"], bucket=item["bucket"], observed_at=item.get("observed_at")):
-                saved.append(item["content"])
-        if saved:
-            conn.commit()
-        return saved
+    saved = []
+    logged_at = hk_now().strftime("%H:%M")
+    for item in extracted:
+        if upsert_daily_log(conn, wa_id, item["log_date"], item["content"], logged_at):
+            saved.append(item["content"])
+    if saved:
+        conn.commit()
+    return saved
+
+
+def daily_log_window_bounds(date_str):
+    start_dt = datetime.fromisoformat(f"{date_str}T04:00:00+08:00")
+    end_dt = start_dt + timedelta(days=1) - timedelta(seconds=1)
+    return start_dt.isoformat(), end_dt.isoformat()
+
+
+def split_daily_log_entries(content):
+    return [clean_text(item) for item in str(content or "").split("。") if clean_text(item)]
+
+
+def parse_log_date_hint(raw_value, fallback_date=""):
+    value = clean_text(raw_value)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return value, None
+    if not value:
+        return fallback_date, None
+    try:
+        observed = datetime.fromisoformat(value).astimezone(HK_TZ)
+    except (ValueError, TypeError):
+        return fallback_date, None
+    return _get_log_date(observed), observed
+
+
+def daily_log_is_sparse(inbound_count, existing_count):
+    inbound_count = max(int(inbound_count or 0), 0)
+    existing_count = max(int(existing_count or 0), 0)
+    if inbound_count <= 0:
+        return False
+    if existing_count <= 0:
+        return True
+    if inbound_count >= 12 and existing_count <= 2:
+        return True
+    if inbound_count >= 6 and existing_count <= 1:
+        return True
+    return False
+
+
+def load_chat_rows_for_daily_log(conn, wa_id, date_str):
+    start_text, end_text = daily_log_window_bounds(date_str)
+    return conn.execute(
+        """
+        SELECT direction, message_type, body, created_at
+        FROM wa_messages
+        WHERE wa_id = ?
+          AND created_at >= ?
+          AND created_at <= ?
+          AND message_type IN ('text', 'image', 'audio')
+        ORDER BY created_at ASC, id ASC
+        """,
+        (wa_id, start_text, end_text),
+    ).fetchall()
+
+
+def format_chat_rows_for_daily_log(chat_rows):
+    lines = []
+    inbound_count = 0
+    for row in chat_rows:
+        direction = clean_text(row["direction"])
+        body = clean_text(row["body"])
+        message_type = clean_text(row["message_type"])
+        speaker = "對方" if direction == "inbound" else "蘇蘇"
+        if message_type == "image":
+            if body:
+                lines.append(f"{speaker}：[圖片 caption] {body}")
+                if direction == "inbound":
+                    inbound_count += 1
+            else:
+                lines.append(f"{speaker}：[send咗圖]")
+            continue
+        if not body:
+            continue
+        lines.append(f"{speaker}：{body}")
+        if direction == "inbound":
+            inbound_count += 1
+    return "\n".join(lines).strip(), inbound_count
+
+
+def load_daily_log_content(conn, wa_id, date_str):
+    row = conn.execute(
+        "SELECT content FROM wa_session_memories WHERE wa_id=? AND memory_key=? LIMIT 1",
+        (wa_id, f"daily:{date_str}"),
+    ).fetchone()
+    return clean_text(row["content"]) if row and row["content"] else ""
+
+
+def extract_daily_log_backfill_items(conn, wa_id, date_str, transcript_text, existing_content):
+    if not transcript_text:
+        return []
+    prompt = f"""
+目標日期：{date_str}
+
+當日聊天記錄：
+{transcript_text}
+
+現有每日日志（請唔好重複）：
+{existing_content or '（暫時未有）'}
+
+請只補回目標日期入面值得保留、但現有每日日志漏咗嘅內容。
+只記對方（唔係蘇蘇）嘅近況、事件、安排、狀態變化、當日有參考價值嘅資訊。
+如果同一句或者同一件事現有日志已經有，就唔好重複。
+
+輸出 JSON array，每項格式：
+{{"content": "事件描述", "observed_at": "YYYY-MM-DD"}}
+
+唔好抽取：
+- 蘇蘇自己講嘅話
+- 純客套、純情緒、冇資訊量內容
+- 純問答互動本身
+- 太私密或太敏感內容
+
+如果無需要補記，輸出 []。
+""".strip()
+
+    extracted = []
+    try:
+        raw = generate_lightweight_router_text(prompt, system_prompt=RECENT_MEMORY_EXTRACTOR_PROMPT)
+        for item in parse_json_array(raw):
+            if not isinstance(item, dict):
+                continue
+            content = clean_text(item.get("content"))
+            if not content or len(content) < 4:
+                continue
+            raw_date = item.get("observed_at")
+            if raw_date:
+                log_date, observed = parse_log_date_hint(raw_date, fallback_date=date_str)
+            else:
+                observed = infer_observed_at_from_text(content)
+                log_date = _get_log_date(observed) if observed else date_str
+            extracted.append({"content": content, "log_date": log_date})
+    except Exception:
+        extracted = []
+
+    if extracted:
+        return extracted
+
+    fallback_source = "\n".join(
+        line.split("：", 1)[1]
+        for line in transcript_text.splitlines()
+        if line.startswith("對方：") and "：" in line
+    )
+    for item in heuristic_extract_session_memories(fallback_source):
+        content = clean_text(item.get("content"))
+        if not content:
+            continue
+        observed = item.get("observed_at") or infer_observed_at_from_text(content)
+        log_date = _get_log_date(observed) if observed else date_str
+        extracted.append({"content": content, "log_date": log_date})
+    return extracted
+
+
+def backfill_daily_log_for_date(conn, wa_id, date_str):
+    chat_rows = load_chat_rows_for_daily_log(conn, wa_id, date_str)
+    transcript_text, inbound_count = format_chat_rows_for_daily_log(chat_rows)
+    if inbound_count <= 0:
+        return {"ok": True, "wa_id": wa_id, "date": date_str, "reason": "no_inbound", "saved": []}
+
+    existing_content = load_daily_log_content(conn, wa_id, date_str)
+    existing_lines = split_daily_log_entries(existing_content)
+    if not daily_log_is_sparse(inbound_count, len(existing_lines)):
+        return {"ok": True, "wa_id": wa_id, "date": date_str, "reason": "enough_logs", "saved": []}
+
+    extracted = extract_daily_log_backfill_items(conn, wa_id, date_str, transcript_text, existing_content)
+    if not extracted:
+        return {"ok": True, "wa_id": wa_id, "date": date_str, "reason": "no_candidates", "saved": []}
+
+    saved = []
+    logged_at = hk_now().strftime("%H:%M")
+    for item in extracted:
+        target_log_date = date_str
+        if upsert_daily_log(conn, wa_id, target_log_date, item["content"], logged_at):
+            saved.append(item["content"])
+    if saved:
+        conn.commit()
+    return {
+        "ok": True,
+        "wa_id": wa_id,
+        "date": date_str,
+        "reason": "backfilled" if saved else "deduped",
+        "saved": saved,
+        "inbound_count": inbound_count,
+        "existing_count": len(existing_lines),
+    }
+
+
+def daily_log_backfill_target_date(now=None):
+    now = now or hk_now()
+    if now.hour == 3 and now.minute == 59:
+        return (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    return ""
+
+
+def run_daily_log_backfill_once(now=None):
+    now = now or hk_now()
+    target_date = daily_log_backfill_target_date(now)
+    if not target_date:
+        return {"ok": True, "status": "not_due"}
+    if _daily_log_backfill_state.get("last_target_date") == target_date:
+        return {"ok": True, "status": "already_ran", "target_date": target_date}
+
+    conn = get_db()
+    try:
+        start_text, end_text = daily_log_window_bounds(target_date)
+        rows = conn.execute(
+            """
+            SELECT DISTINCT wa_id
+            FROM wa_messages
+            WHERE created_at >= ?
+              AND created_at <= ?
+            ORDER BY wa_id ASC
+            """,
+            (start_text, end_text),
+        ).fetchall()
+        scanned = 0
+        backfilled = []
+        for row in rows:
+            wa_id = clean_text(row["wa_id"])
+            if not wa_id:
+                continue
+            scanned += 1
+            result = backfill_daily_log_for_date(conn, wa_id, target_date)
+            if result.get("saved"):
+                backfilled.append({"wa_id": wa_id, "saved": result["saved"]})
+        _daily_log_backfill_state["last_target_date"] = target_date
+        return {
+            "ok": True,
+            "status": "scanned",
+            "target_date": target_date,
+            "checked": scanned,
+            "backfilled": backfilled,
+        }
     finally:
-        lock.release()
+        conn.close()
+
+
+def daily_log_backfill_loop():
+    time.sleep(5)
+    while True:
+        try:
+            run_daily_log_backfill_once()
+        except Exception:
+            pass
+        time.sleep(30)
+
+
+def archive_backfill_once(limit=300):
+    conn = get_db()
+    try:
+        backfill_message_archive_rows(conn, HK_TZ, limit=max(1, int(limit)))
+        reconcile_message_archive_links(conn, HK_TZ, limit=max(1, int(limit)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def archive_backfill_loop():
+    time.sleep(8)
+    while True:
+        try:
+            archive_backfill_once(limit=300)
+        except Exception:
+            pass
+        time.sleep(180)
 
 
 def load_session_memory_rows(conn, wa_id, limit=8, bucket=None):
@@ -5274,7 +6266,7 @@ def load_session_memory_rows(conn, wa_id, limit=8, bucket=None):
         ORDER BY updated_at DESC, id DESC
         LIMIT 80
         """,
-        (wa_id, now.astimezone(timezone.utc).isoformat()),
+        (wa_id, now.isoformat()),
     ).fetchall()
     items = []
     for row in rows:
@@ -5415,7 +6407,6 @@ def build_proactive_prompt(conn, wa_id, profile_name, now=None):
 
 def evaluate_proactive_candidate(conn, wa_id, profile_name="", now=None):
     now = now or hk_now()
-    now_utc = now.astimezone(timezone.utc)
     settings = get_runtime_settings()
     conversation_window_hours = int(settings["proactive_conversation_window_hours"])
     min_silence_minutes = int(settings["proactive_min_silence_minutes"])
@@ -5427,7 +6418,7 @@ def evaluate_proactive_candidate(conn, wa_id, profile_name="", now=None):
     last_inbound = get_last_message_time(conn, wa_id, "inbound")
     if not last_inbound:
         return {"eligible": False, "reason": "no_inbound"}
-    if now_utc - last_inbound > timedelta(hours=conversation_window_hours):
+    if now - last_inbound > timedelta(hours=conversation_window_hours):
         return {"eligible": False, "reason": "window_closed"}
 
     last_row = get_last_message_row(conn, wa_id)
@@ -5440,7 +6431,7 @@ def evaluate_proactive_candidate(conn, wa_id, profile_name="", now=None):
     if not last_any:
         return {"eligible": False, "reason": "no_last_message_time"}
 
-    silence_minutes = max((now_utc - last_any).total_seconds() / 60.0, 0.0)
+    silence_minutes = max((now - last_any).total_seconds() / 60.0, 0.0)
     if silence_minutes < min_silence_minutes:
         return {"eligible": False, "reason": "cooling", "silence_minutes": silence_minutes}
 
@@ -5450,7 +6441,7 @@ def evaluate_proactive_candidate(conn, wa_id, profile_name="", now=None):
     last_proactive = get_last_proactive_event(conn, wa_id)
     if last_proactive:
         last_proactive_at = parse_iso_dt(last_proactive.get("created_at", ""))
-        if last_proactive_at and now_utc - last_proactive_at < timedelta(minutes=cooldown_minutes):
+        if last_proactive_at and now - last_proactive_at < timedelta(minutes=cooldown_minutes):
             return {"eligible": False, "reason": "proactive_cooldown"}
 
     if count_inbound_messages(conn, wa_id) < min_inbound_messages:
@@ -5476,7 +6467,7 @@ def evaluate_proactive_candidate(conn, wa_id, profile_name="", now=None):
     }.get(slot_key, 0.0)
     relationship_bonus = min(recent_hook_count, 3) * 0.12
     history_bonus = (slot_rate - 0.5) * 1.6
-    age_penalty = -0.35 if (now_utc - last_inbound) > timedelta(hours=8) else 0.0
+    age_penalty = -0.35 if (now - last_inbound) > timedelta(hours=8) else 0.0
     late_penalty = -0.25 if 1 <= now.hour < 8 else 0.0
     score = -1.95 + silence_bonus + slot_bias + relationship_bonus + history_bonus + image_bonus + age_penalty + late_penalty - (daily_count * 0.55)
     probability = min(0.70, max(0.08, sigmoid(score)))
@@ -5546,6 +6537,17 @@ def send_proactive_message(conn, candidate, now=None):
                     utc_now(),
                 ),
             )
+            archive_message(
+                conn,
+                HK_TZ,
+                wa_id=wa_id,
+                direction="outbound",
+                message_id=(response.get("messages") or [{}])[0].get("id", ""),
+                message_type="text",
+                body=bubble,
+                raw_json=json.dumps(response, ensure_ascii=False),
+                created_at=utc_now(),
+            )
             conn.commit()
             if index < len(bubbles) - 1:
                 time.sleep(1.0)
@@ -5569,6 +6571,17 @@ def send_proactive_message(conn, candidate, now=None):
                 json.dumps({"error": str(exc)}, ensure_ascii=False),
                 utc_now(),
             ),
+        )
+        archive_message(
+            conn,
+            HK_TZ,
+            wa_id=wa_id,
+            direction="outbound",
+            message_id="",
+            message_type="error",
+            body=f"proactive_send_failed: {exc}",
+            raw_json=json.dumps({"error": str(exc)}, ensure_ascii=False),
+            created_at=utc_now(),
         )
         conn.commit()
         return {"ok": False, "reason": f"send_failed: {exc}"}
@@ -5958,12 +6971,38 @@ def build_task_state(history_rows, incoming_text):
         re.fullmatch(r"\d{1,4}", compact) or current_text.lower() in {"yes", "no", "ok", "sure"}
     )
 
-    live_search_plan = build_live_search_plan(current_text) or {}
+    router_signal = live_search_intent_gate(current_text) or {}
+    live_search_plan = build_live_search_plan(current_text, intent=router_signal) or {}
+    router_task_type = clean_text(router_signal.get("reply_task_type", "")).lower()
+    use_previous_context = bool(router_signal.get("use_previous_context"))
+    needs_history_recall = bool(router_signal.get("needs_history_recall"))
+    lowered_current = current_text.lower()
+    if any(marker in current_text for marker in HISTORY_RECALL_STRONG_HINTS):
+        use_previous_context = True
+        needs_history_recall = True
+        if router_task_type in {"", "casual_chat", "task_help"}:
+            router_task_type = "memory_recall"
+    if any(marker in current_text for marker in HISTORY_RECALL_FOLLOWUP_HINTS):
+        use_previous_context = True
+        if any(marker in clean_text(previous_assistant) for marker in ("睇唔到", "看不到", "記唔得", "记不得", "唔記得", "不记得", "load唔到", "load不到", "回覆緊邊句", "回复哪句")):
+            needs_history_recall = True
+            if router_task_type in {"", "casual_chat", "task_help"}:
+                router_task_type = "memory_recall"
     if live_search_plan.get("should_search"):
         task_type = "search_request"
         user_intent = "wants fresh factual information"
         expected_next_move = "use grounded search results before replying"
         confidence = 0.92
+    elif router_task_type == "memory_recall":
+        task_type = "memory_recall"
+        user_intent = "is referring to an earlier chat topic and likely expects you to recover the missing context from older messages"
+        expected_next_move = "look further back in the chat history, recover the most likely prior topic, then answer directly instead of pretending you forgot"
+        confidence = 0.86
+    elif router_task_type == "context_followup" or use_previous_context:
+        task_type = "context_followup"
+        user_intent = "is sending a short follow-up that depends on previous context"
+        expected_next_move = "resolve the implied context from earlier chat before replying; do not treat this as standalone small talk"
+        confidence = 0.84
     elif identifier_like:
         task_type = "guessing_or_clue"
         user_intent = "is sending a code or identifier that likely answers or narrows the current topic"
@@ -6026,14 +7065,109 @@ def build_task_state(history_rows, incoming_text):
         "identifier_like": identifier_like,
         "has_reply_context": has_reply_context,
         "has_context_anchor": has_context_anchor,
+        "use_previous_context": use_previous_context,
+        "needs_history_recall": needs_history_recall,
         "surface_text": current_text,
     }
+
+
+def load_history_recall_rows(conn, wa_id, incoming_text, task_state, limit=8, scan_limit=120):
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT direction, message_id, message_type, body, raw_json, created_at
+            FROM wa_messages
+            WHERE wa_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (wa_id, max(scan_limit, limit * 4)),
+        ).fetchall()
+    ]
+    if not rows:
+        return []
+    enriched_rows = enrich_rows_with_quote_context(conn, wa_id, rows)
+    query_text = "\n".join(
+        filter(
+            None,
+            [
+                clean_text(incoming_text),
+                clean_text(task_state.get("previous_user", "")),
+                clean_text(task_state.get("latest_question_text", "")),
+            ],
+        )
+    )
+    query_terms = extract_match_terms(query_text)
+    history_target_date = detect_history_target_date_str(incoming_text)
+    target_history_date = None
+    if history_target_date:
+        try:
+            target_history_date = datetime.fromisoformat(history_target_date).date()
+        except Exception:
+            target_history_date = None
+    selected = []
+    for index, row in enumerate(enriched_rows):
+        body = clean_text(row.get("body", ""))
+        if not body or body == clean_text(incoming_text):
+            continue
+        score = 0
+        lowered = body.lower()
+        normalized = normalize_key(body)
+        for term in query_terms[:16]:
+            if term and term in lowered:
+                score += 4 if len(term) >= 3 else 2
+            compact_term = normalize_key(term)
+            if compact_term and compact_term in normalized:
+                score += 2
+        if task_state.get("use_previous_context"):
+            score += 2
+        if task_state.get("needs_history_recall"):
+            score += 2
+        if row.get("direction") == "inbound":
+            score += 4
+        else:
+            score -= 2
+        if len(body) >= 10:
+            score += 2
+        if any(marker in body for marker in ARCHIVE_LOOKUP_TIME_MARKERS + HISTORY_RECALL_STRONG_HINTS):
+            score += 4
+        if any(marker in body for marker in ("因為", "因为", "所以", "其實", "其实", "中午", "尋晚", "噚晚", "昨日", "昨天", "前日")):
+            score += 3
+        if any(marker in body for marker in ("你唔記得", "你不记得", "我昨天都话你知啦", "我噚日都話你知啦", "你再看一下啦", "你再睇下")):
+            score -= 3
+        if target_history_date is not None:
+            parsed_created = parse_iso_dt(row.get("created_at"))
+            if parsed_created:
+                row_date = parsed_created.astimezone(HK_TZ).date()
+                if row_date == target_history_date:
+                    score += 10
+                elif abs((row_date - target_history_date).days) == 1:
+                    score += 2
+        score += max(0, 8 - min(index, 8))
+        if score <= 2:
+            continue
+        row["_recall_score"] = score
+        selected.append(row)
+    selected.sort(key=lambda item: (-item.get("_recall_score", 0), item.get("created_at", "")))
+    return list(reversed(selected[:limit]))
 
 
 def score_memory_text(content, query_terms, recent_text, task_state, importance=3, updated_at=None):
     text = clean_text(content)
     if not text:
         return -1
+    clauses = re.split(r'[。！？\n]+', text)
+    clauses = [c.strip() for c in clauses if c.strip()]
+    if not clauses:
+        return -1
+    if len(clauses) == 1:
+        return _score_text(clauses[0], query_terms, recent_text, task_state, importance, updated_at)
+    scores = [_score_text(c, query_terms, recent_text, task_state, importance, updated_at) for c in clauses]
+    return max(scores) if scores else -1
+
+
+def _score_text(text, query_terms, recent_text, task_state, importance=3, updated_at=None):
     score = 0
     lowered = text.lower()
     normalized = normalize_key(text)
@@ -6045,14 +7179,12 @@ def score_memory_text(content, query_terms, recent_text, task_state, importance=
             score += 3
     if recent_text and any(term in lowered for term in extract_match_terms(recent_text)[:10]):
         score += 2
-    # Importance boost: importance 5 → +4, 4 → +2, 3 → 0, 2 → -1, 1 → -2
     imp = max(1, min(5, int(importance or 3)))
     score += (imp - 3) * 2
-    # Age decay for long-term memories: penalise memories not refreshed in a long time
     if updated_at:
         parsed = parse_iso_dt(updated_at)
         if parsed:
-            age_days = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).days
+            age_days = (hk_now() - parsed).days
             if age_days > 180:
                 score -= 3
             elif age_days > 90:
@@ -6072,10 +7204,8 @@ def score_memory_text(content, query_terms, recent_text, task_state, importance=
         )
         if any(kw in lowered for kw in _edu_kw):
             score += 6
-        # Course codes like COMP3511, ISOM3320
         if re.search(r"[a-z]{2,6}\d{2,6}", lowered):
             score += 4
-        # Day / week / time mentions make a memory more schedule-relevant
         if re.search(r"星期[一二三四五六日]|禮拜[一二三四五六日]|monday|tuesday|wednesday|thursday|friday", lowered):
             score += 3
     return score
@@ -6165,7 +7295,20 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
     primary_text = primary_profile_memory_for_wa(wa_id, settings)
     history_rows = list(load_recent_messages(conn, wa_id))
     task_state = build_task_state(history_rows, incoming_text)
+    if task_state.get("needs_history_recall") or (task_state.get("use_previous_context") and not task_state.get("has_context_anchor")):
+        expanded_history_rows = list(load_recent_messages(conn, wa_id, limit=36))
+        if len(expanded_history_rows) > len(history_rows):
+            history_rows = expanded_history_rows
+            task_state = build_task_state(history_rows, incoming_text)
     selected = select_relevant_memories(conn, wa_id, incoming_text, task_state, history_rows, primary_text)
+    recall_rows = []
+    if task_state.get("needs_history_recall") or task_state.get("use_previous_context"):
+        recall_rows = load_history_recall_rows(conn, wa_id, incoming_text, task_state, limit=6)
+    verbatim_history_lines = []
+    history_target_date = detect_history_target_date_str(incoming_text)
+    if history_target_date:
+        verbatim_rows = load_archive_messages_by_date(conn, wa_id, history_target_date, limit=40, direction="inbound")
+        verbatim_history_lines = format_archive_verbatim_lines(verbatim_rows, limit=12)
 
     short_groups = {"within_24h": [], "within_3d": [], "within_7d": []}
     for row in selected["selected_short_term"]:
@@ -6207,6 +7350,7 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
         )
 
     recent_messages = []
+    current_quote_hint = ""
     for item in history_rows:
         body = clean_text(item.get("body", ""))
         if not body:
@@ -6223,12 +7367,35 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
         else:
             content = body
         recent_messages.append({"role": role, "content": content, "body": body, "direction": item.get("direction", ""), "message_id": item.get("message_id", "")})
+        if role == "user" and body == clean_text(incoming_text):
+            quoted_body = clean_text(item.get("quoted_body", ""))
+            quoted_preview = clean_text(item.get("quoted_preview", ""))
+            quoted_direction = clean_text(item.get("quoted_direction", ""))
+            if quoted_body:
+                quoted_speaker = "你之前講過" if quoted_direction == "inbound" else "蘇蘇之前講過"
+                current_quote_hint = f"Current inbound is replying to an older quoted message: {quoted_speaker}「{quoted_body}」"
+            elif quoted_preview:
+                current_quote_hint = f"Current inbound is replying to an older quoted message: {quoted_preview}"
+
+    history_recall_lines = []
+    for item in recall_rows:
+        body = clean_text(item.get("body", ""))
+        if not body:
+            continue
+        speaker = "user" if item.get("direction") == "inbound" else "susu"
+        quote_suffix = format_quote_context_suffix(item) if item.get("direction") == "inbound" else ""
+        line = f"{speaker}: {body}"
+        if quote_suffix:
+            line = f"{speaker} {quote_suffix}: {body}"
+        history_recall_lines.append(line)
 
     prompt_user_text = clean_text(incoming_text) or "(The user only sent images without extra text.)"
     if image_note:
         prompt_user_text = f"{prompt_user_text}\n\n{image_note}"
     if quote_hint:
         prompt_user_text = f"{prompt_user_text}\n\n{quote_hint}"
+    if current_quote_hint:
+        prompt_user_text = f"{prompt_user_text}\n\n{current_quote_hint}"
 
     persona_block = normalize_runtime_multiline(settings.get("system_persona"), SYSTEM_PERSONA)
     core_profile_block = build_core_profile_memory_text(primary_text) if primary_text else ""
@@ -6247,7 +7414,10 @@ def build_runtime_context(conn, wa_id, profile_name, incoming_text, image_inputs
         "within_3d": short_groups.get("within_3d", []),
         "within_7d": short_groups.get("within_7d", []),
         "archive": archive_lines,
+        "history_recall": history_recall_lines,
+        "verbatim_history": verbatim_history_lines,
         "current_location": current_location,
+        "current_quote_hint": current_quote_hint,
         "calendar_events": calendar_events,
         "today_holiday": today_holiday,
         "semester_period": semester_period,
@@ -6297,6 +7467,12 @@ def format_task_state_block(task_state):
     surface_text = clean_text(task_state.get("surface_text", ""))
     if surface_text:
         lines.append(f"- surface_text: {surface_text}")
+    if task_state.get("use_previous_context"):
+        lines.append("- use_previous_context: resolve this message with nearby prior chat if relevant")
+    if task_state.get("needs_history_recall"):
+        lines.append("- needs_history_recall: look further back in chat history before replying")
+    if detect_history_target_date_str(task_state.get("surface_text", "")):
+        lines.append("- prefer verbatim local chat records for the referenced day before guessing from summaries")
     return "\n".join(lines)
 
 
@@ -6309,6 +7485,12 @@ def build_legacy_prompt_from_runtime_context(runtime_context):
     archive_section = ""
     if memory_block["archive"]:
         archive_section = "\n\nArchived memories (only use if the user is clearly asking about older events):\n" + "\n".join(memory_block["archive"])
+    recall_section = ""
+    if memory_block.get("history_recall"):
+        recall_section = "\n\nRecovered older chat context (use if it matches the user's current reference):\n" + "\n".join(memory_block["history_recall"])
+    verbatim_section = ""
+    if memory_block.get("verbatim_history"):
+        verbatim_section = "\n\nVerbatim local chat records for the referenced day:\n" + "\n".join(memory_block["verbatim_history"])
     current_user_text = runtime_context["current_user_text"]
     task_state_text = format_task_state_block(runtime_context["task_state"])
     return f"""
@@ -6333,7 +7515,7 @@ Relevant recent memories within 3d:
 {chr(10).join(memory_block["within_3d"]) if memory_block["within_3d"] else "(none)"}
 
 Relevant recent memories within 7d:
-{chr(10).join(memory_block["within_7d"]) if memory_block["within_7d"] else "(none)"}{archive_section}
+{chr(10).join(memory_block["within_7d"]) if memory_block["within_7d"] else "(none)"}{archive_section}{recall_section}{verbatim_section}
 
 Recent chat history:
 {history_text}
@@ -6378,6 +7560,8 @@ def build_structured_context_from_runtime_context(runtime_context):
         system_parts.append("學期狀態：" + memory_block["semester_period"])
     if memory_block.get("today_holiday"):
         system_parts.append("今日公眾假期：" + memory_block["today_holiday"])
+    if memory_block.get("current_quote_hint"):
+        system_parts.append(memory_block["current_quote_hint"])
     today_block = format_calendar_block(memory_block.get("calendar_events", []), "今日日程", 0, runtime_context.get("time_style", ""))
     if today_block:
         system_parts.append(today_block)
@@ -6390,6 +7574,10 @@ def build_structured_context_from_runtime_context(runtime_context):
     system_parts.append("Relevant recent memories within 7d:\n" + ("\n".join(memory_block["within_7d"]) if memory_block["within_7d"] else "(none)"))
     if memory_block["archive"]:
         system_parts.append("Relevant archived memories:\n" + "\n".join(memory_block["archive"]))
+    if memory_block.get("history_recall"):
+        system_parts.append("Recovered older chat context:\n" + "\n".join(memory_block["history_recall"]))
+    if memory_block.get("verbatim_history"):
+        system_parts.append("Verbatim local chat records for the referenced day:\n" + "\n".join(memory_block["verbatim_history"]))
     system_parts.append("Time style:\n" + runtime_context["time_style"])
     if runtime_context["quote_context"]["quote_hint"]:
         system_parts.append(runtime_context["quote_context"]["quote_hint"])
@@ -6559,6 +7747,34 @@ def rewrite_as_complete_message(profile_name, incoming_text, draft_reply):
     return generate_model_text(prompt, temperature=0.72, max_tokens=180)
 
 
+def critique_and_rewrite_reply(profile_name, incoming_text, draft_reply):
+    draft = clean_text(draft_reply)
+    if not draft:
+        return draft_reply
+    if not any(marker in draft for marker in ("佢", "；", "查唔到", "唔記得", "不记得", "記得唔清楚", "想搜咩", "搜咩", "查咩")):
+        return draft_reply
+    prompt = f"""
+你而家係蘇蘇嘅回覆質檢器，只做最後微調。
+
+用戶啱啱講：{clean_text(incoming_text)}
+目前草稿：{draft}
+
+檢查重點：
+- 如果草稿將用戶講成「佢」，改返做直接對住用戶講嘅「你」
+- 如果有太書面或奇怪標點，例如連續「；」，改自然啲
+- 如果草稿太快話自己查唔到、唔記得、唔知想搜咩，但其實可以直接接住語境講，就改成更自然、更主動
+- 保持原本意思，唔好重寫到變另一個答案
+- 用繁體港式廣東話，似自然 WhatsApp
+- 只輸出最後回覆本身
+""".strip()
+    try:
+        revised = generate_lightweight_router_text(prompt, system_prompt="你只負責微調 WhatsApp 回覆語氣與代詞。只輸出修改後嘅一句或兩句回覆。")
+        revised = clean_text(revised)
+        return revised or draft_reply
+    except Exception:
+        return draft_reply
+
+
 def log_outbound_error(conn, wa_id, error_type, error_detail):
     conn.execute(
         """
@@ -6572,7 +7788,34 @@ def log_outbound_error(conn, wa_id, error_type, error_detail):
             utc_now(),
         ),
     )
+    archive_message(
+        conn,
+        HK_TZ,
+        wa_id=wa_id,
+        direction="outbound",
+        message_id="",
+        message_type="error",
+        body=error_type,
+        raw_json=json.dumps({"error": str(error_detail)}, ensure_ascii=False),
+        created_at=utc_now(),
+    )
     conn.commit()
+
+
+def format_archive_verbatim_lines(rows, limit=12):
+    lines = []
+    for row in rows[-max(1, int(limit)):]:
+        body = clean_text(row.get("body", ""))
+        if not body:
+            continue
+        try:
+            dt = parse_iso_dt(row.get("created_at", ""))
+            label = dt.astimezone(HK_TZ).strftime("%H:%M") if dt else "--:--"
+        except Exception:
+            label = "--:--"
+        speaker = "user" if clean_text(row.get("direction")) == "inbound" else "susu"
+        lines.append(f"[{label}] {speaker}: {body}")
+    return lines
 
 
 def maybe_extract_qa_turn_memory(conn, wa_id, combined_text):
@@ -6637,14 +7880,25 @@ def maybe_extract_qa_turn_memory(conn, wa_id, combined_text):
     conn.commit()
 
 
+def _should_trigger_session_extraction(wa_id):
+    now = time.time()
+    state = _session_extraction_state.get(wa_id, {"turns": 0, "last_at": 0.0})
+    elapsed = now - state["last_at"]
+    if state["turns"] >= _SIDEEFFECT_EXTRACTION_THRESHOLD_ROUNDS or elapsed >= _SIDEEFFECT_EXTRACTION_THRESHOLD_SECONDS:
+        _session_extraction_state[wa_id] = {"turns": 0, "last_at": now}
+        return True
+    _session_extraction_state[wa_id] = {"turns": state["turns"] + 1, "last_at": state["last_at"]}
+    return False
+
+
 def record_batch_side_effects(conn, wa_id, profile_name, combined_text, memory_text, image_categories):
     if memory_text:
         maybe_extract_memories(conn, wa_id, profile_name, memory_text)
     if combined_text:
         maybe_update_user_location(conn, wa_id, combined_text)
-    if combined_text:
-        maybe_extract_session_memories(conn, wa_id, combined_text)
-        maybe_extract_qa_turn_memory(conn, wa_id, combined_text)
+    if memory_text:
+        if _should_trigger_session_extraction(wa_id):
+            maybe_extract_session_memories(conn, wa_id, memory_text)
         try:
             remind_at, remind_content = parse_reminder(wa_id, combined_text)
             if remind_at and remind_content:
@@ -6846,6 +8100,17 @@ def process_pending_replies_for_contact(wa_id):
                         "VALUES (?, 'outbound', ?, 'text', ?, '{}', ?)",
                         (wa_id, batch_last_message_id or f"fallback_{batch_last_id}", reply_text, utc_now()),
                     )
+                    archive_message(
+                        conn,
+                        HK_TZ,
+                        wa_id=wa_id,
+                        direction="outbound",
+                        message_id=batch_last_message_id or f"fallback_{batch_last_id}",
+                        message_type="text",
+                        body=reply_text,
+                        raw_json="{}",
+                        created_at=utc_now(),
+                    )
                     conn.commit()
                 if finish_reply_worker_if_idle(wa_id, target_version):
                     return
@@ -6906,6 +8171,8 @@ def process_pending_replies_for_contact(wa_id):
                 continue
 
             superseded = False
+            timed_out = False
+            generation_started_at = time.monotonic()
             while reply_proc.poll() is None:
                 touch_reply_worker_heartbeat(wa_id)
                 latest_version, latest_profile_name, _ = get_reply_worker_snapshot(wa_id)
@@ -6914,13 +8181,19 @@ def process_pending_replies_for_contact(wa_id):
                 if latest_version != target_version or get_latest_inbound_id_for_wa(wa_id) != batch_last_id:
                     superseded = True
                     break
+                if time.monotonic() - generation_started_at > max(REPLY_GENERATION_TIMEOUT_SECONDS, 5.0):
+                    timed_out = True
+                    reply_text = "我啱啱個腦有啲轉得太慢，你等我一陣再同你講過，好唔好？"
+                    log_outbound_error(conn, wa_id, "model_timeout", f"reply_generation_timeout>{REPLY_GENERATION_TIMEOUT_SECONDS}s")
+                    break
                 time.sleep(max(REPLY_JOB_POLL_SECONDS, 0.01))
 
-            if superseded:
+            if superseded or timed_out:
                 terminate_reply_generation_subprocess(reply_proc)
                 if typing_stop:
                     typing_stop.set()
-                continue
+                if superseded:
+                    continue
 
             try:
                 reply_text = read_reply_generation_subprocess_result(reply_proc)
@@ -6952,6 +8225,17 @@ def process_pending_replies_for_contact(wa_id):
                     VALUES (?, 'outbound', ?, 'text', ?, ?, ?)
                     """,
                     (wa_id, "voice_sent_" + str(batch_last_id), "[voice]", json.dumps({"type": "voice"}), utc_now()),
+                )
+                archive_message(
+                    conn,
+                    HK_TZ,
+                    wa_id=wa_id,
+                    direction="outbound",
+                    message_id="voice_sent_" + str(batch_last_id),
+                    message_type="text",
+                    body="[voice]",
+                    raw_json=json.dumps({"type": "voice"}),
+                    created_at=utc_now(),
                 )
                 conn.commit()
                 if typing_stop:
@@ -6999,6 +8283,17 @@ def process_pending_replies_for_contact(wa_id):
                             json.dumps(response, ensure_ascii=False),
                             utc_now(),
                         ),
+                    )
+                    archive_message(
+                        conn,
+                        HK_TZ,
+                        wa_id=wa_id,
+                        direction="outbound",
+                        message_id=(response.get("messages") or [{}])[0].get("id", ""),
+                        message_type="text",
+                        body=bubble,
+                        raw_json=json.dumps(response, ensure_ascii=False),
+                        created_at=utc_now(),
                     )
                     conn.commit()
 
@@ -7070,7 +8365,7 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
     if live_search_reply:
         return live_search_reply
 
-    if not RELAY_API_KEY:
+    if not RELAY_API_KEY and not anthropic_gateway_enabled():
         return "我啱啱個腦有啲lag lag 地，等我緩一緩先再同你傾，好唔好？"
 
     toggle_only = toggle_result != "unchanged"
@@ -7179,6 +8474,11 @@ def generate_reply(conn, wa_id, profile_name, incoming_text, image_inputs=None, 
             reply = final_try
         else:
             reply = "返到就好啦，你再同我講多句啦，我想知你而家點呀，嘻嘻。"
+
+    reply = shorten_whatsapp_reply(
+        critique_and_rewrite_reply(profile_name, incoming_text, reply),
+        night_mode=night_mode,
+    ) or reply
 
     vm_on = is_voice_mode_enabled(conn, wa_id)
     if vm_on and not toggle_only:
@@ -7290,6 +8590,19 @@ class Handler(BaseHTTPRequestHandler):
                 inbound_row_id = cursor.lastrowid
                 if cursor.rowcount == 0:
                     continue  # duplicate message_id, already processed
+                archive_message(
+                    conn,
+                    HK_TZ,
+                    wa_id=event["wa_id"],
+                    direction="inbound",
+                    message_id=event["message_id"],
+                    message_type=event["message_type"],
+                    body=event["body"],
+                    raw_json=json.dumps(event["raw"], ensure_ascii=False),
+                    created_at=utc_now(),
+                    media_id=event.get("media_id", ""),
+                    mime_type=event.get("mime_type", ""),
+                )
                 inbound_created_at = conn.execute(
                     "SELECT created_at FROM wa_messages WHERE id = ?",
                     (inbound_row_id,),

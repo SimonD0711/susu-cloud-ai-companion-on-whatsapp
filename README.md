@@ -199,7 +199,7 @@ susu-cloud/
 │   ├── ai/                       # AI layer tests
 │   └── wa_agent/                 # Agent module tests
 │
-├── HANDOVER.md                   # Operations manual (production details)
+├── OPERATIONS.md                # Operations manual (production details)
 ├── REFACTOR-PLAN.md              # Architecture refactor plan
 └── .github/
     ├── workflows/ci.yml         # CI/CD pipeline

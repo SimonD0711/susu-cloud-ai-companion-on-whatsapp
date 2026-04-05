@@ -45,6 +45,11 @@ class AIConfig:
     RELAY_MODEL: str = field(default_factory=lambda: _env("WA_RELAY_MODEL", "claude-opus-4-6"))
     RELAY_FALLBACK_MODEL: str = field(default_factory=lambda: _env("WA_RELAY_FALLBACK_MODEL", "claude-sonnet-4-6"))
     RELAY_BASE_URL: str = field(default_factory=lambda: _env("WA_RELAY_BASE_URL", "https://apiapipp.com/v1"))
+    RELAY_AUTH_HEADER: str = field(default_factory=lambda: _env("WA_RELAY_AUTH_HEADER", "Authorization"))
+    RELAY_AUTH_TOKEN: str = field(default_factory=lambda: _env("WA_RELAY_AUTH_TOKEN", ""))
+    RELAY_EXTRA_AUTH_HEADER: str = field(default_factory=lambda: _env("WA_RELAY_EXTRA_AUTH_HEADER", ""))
+    RELAY_EXTRA_AUTH_TOKEN: str = field(default_factory=lambda: _env("WA_RELAY_EXTRA_AUTH_TOKEN", ""))
+    RELAY_USER_AGENT: str = field(default_factory=lambda: _env("WA_RELAY_USER_AGENT", ""))
     RELAY_RETRY_COUNT: int = field(default_factory=lambda: _env_int("WA_RELAY_RETRY_COUNT", 2))
     RELAY_RETRY_BACKOFF_SECONDS: float = field(default_factory=lambda: _env_float("WA_RELAY_RETRY_BACKOFF_SECONDS", 1.0))
 

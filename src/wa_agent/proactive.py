@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import difflib
+import json
 import math
+import os
 import random
 import re
 import time as time_module
@@ -200,6 +202,16 @@ def _generate_model_text(prompt: str, temperature: float = 0.72, max_tokens: int
     return generate_model_text(prompt, temperature=temperature, max_tokens=max_tokens)
 
 
+def _generate_router_text(prompt: str, system_prompt: str = "") -> str:
+    import sys
+    from pathlib import Path
+    wa_path = str(Path(__file__).resolve().parent.parent.parent)
+    if wa_path not in sys.path:
+        sys.path.insert(0, wa_path)
+    from wa_agent import generate_lightweight_router_text
+    return generate_lightweight_router_text(prompt, system_prompt=system_prompt)
+
+
 def split_profile_memory_lines(value: str) -> list[str]:
     lines = []
     for raw_line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -270,15 +282,17 @@ def _get_runtime_settings() -> dict:
     rows = conn.execute("SELECT key, value FROM wa_susu_settings").fetchall()
     settings = {row["key"]: row["value"] for row in rows}
     defaults = {
-        "proactive_enabled": "true",
-        "proactive_conversation_window_hours": "14",
-        "proactive_min_silence_minutes": "25",
-        "proactive_cooldown_minutes": "30",
-        "proactive_min_inbound_messages": "3",
-        "proactive_max_per_service_day": "3",
-        "proactive_reply_window_minutes": "35",
-        "proactive_scan_seconds": "300",
+        "proactive_enabled": os.environ.get("WA_PROACTIVE_ENABLED", "true"),
+        "proactive_conversation_window_hours": os.environ.get("WA_PROACTIVE_CONVERSATION_WINDOW_HOURS", "14"),
+        "proactive_min_silence_minutes": os.environ.get("WA_PROACTIVE_MIN_SILENCE_MINUTES", "25"),
+        "proactive_cooldown_minutes": os.environ.get("WA_PROACTIVE_COOLDOWN_MINUTES", "30"),
+        "proactive_min_inbound_messages": os.environ.get("WA_PROACTIVE_MIN_INBOUND_MESSAGES", "3"),
+        "proactive_max_per_service_day": os.environ.get("WA_PROACTIVE_MAX_PER_SERVICE_DAY", "3"),
+        "proactive_reply_window_minutes": os.environ.get("WA_PROACTIVE_REPLY_WINDOW_MINUTES", "35"),
+        "proactive_scan_seconds": os.environ.get("WA_PROACTIVE_SCAN_SECONDS", "300"),
         "primary_user_memory": "",
+        "WA_ACCESS_TOKEN": os.environ.get("WA_ACCESS_TOKEN", ""),
+        "WA_PHONE_NUMBER_ID": os.environ.get("WA_PHONE_NUMBER_ID", ""),
     }
     for k, v in defaults.items():
         if k not in settings:
@@ -499,7 +513,23 @@ def finalize_stale_proactive_events(conn, wa_id: Optional[str] = None) -> None:
 from src.wa_agent.brain import shorten_whatsapp_reply, split_reply_bubbles, maybe_stage_followup_bubbles
 
 
-def build_proactive_prompt(conn, wa_id: str, profile_name: str, now: Optional[datetime] = None) -> str:
+def _parse_json_object(raw: str) -> dict[str, Any]:
+    text = _clean_text(raw)
+    if not text:
+        return {}
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return {}
+    candidate = text[start : end + 1]
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def build_proactive_prompt(conn, wa_id: str, profile_name: str, now: Optional[datetime] = None, llm_decision: Optional[dict] = None) -> str:
     now = now or hk_now()
     settings = _get_runtime_settings()
     primary_text = primary_profile_memory_for_wa(wa_id, settings)
@@ -527,6 +557,18 @@ def build_proactive_prompt(conn, wa_id: str, profile_name: str, now: Optional[da
     if image_stats_text:
         image_hint = f"\n對方平時 send 圖偏多嘅類型：{image_stats_text}"
 
+    decision_block = ""
+    if llm_decision:
+        decision_block = f"""
+
+LLM 主動判斷：
+- should_send: {llm_decision.get('should_send')}
+- confidence: {llm_decision.get('confidence')}
+- topic: {llm_decision.get('topic') or 'none'}
+- tone: {llm_decision.get('tone') or 'none'}
+- reason: {llm_decision.get('reason') or 'none'}
+""".rstrip()
+
     return f"""
 對方 WhatsApp 顯示名稱：{profile_name or "對方"}
 
@@ -548,6 +590,8 @@ def build_proactive_prompt(conn, wa_id: str, profile_name: str, now: Optional[da
 最近聊天：
 {history_text}{image_hint}
 
+{decision_block}
+
 時段風格：
 {style_window_text(now)}
 
@@ -564,8 +608,72 @@ def build_proactive_prompt(conn, wa_id: str, profile_name: str, now: Optional[da
 - 日頭偏向 1 句，夜晚最多 2 句
 - 唔好太刻意，唔好解釋點解主動搵佢
 - 唔好催瞓，除非對方主動提起想瞓
+- 如果上面有 LLM topic / tone / reason，優先跟住嗰個方向寫
 - 直接輸出要發嘅內容本身
 """.strip()
+
+
+def proactive_llm_decide(conn, candidate: dict, now: Optional[datetime] = None) -> dict:
+    now = now or hk_now()
+    wa_id = candidate["wa_id"]
+    profile_name = candidate.get("profile_name", "")
+    settings = _get_runtime_settings()
+    primary_text = primary_profile_memory_for_wa(wa_id, settings)
+    history_lines = []
+    for item in load_recent_messages(conn, wa_id, limit=10):
+        speaker = "對方" if item.get("direction") == "inbound" else "蘇蘇"
+        body = _clean_text(item.get("body", ""))
+        if body:
+            history_lines.append(f"{speaker}{format_quote_context_suffix(item)}: {body}")
+    within_24h_text = "\n".join(format_session_memory_lines(conn, wa_id, "within_24h", limit=4)) or "（暫時未有 24 小時內記憶）"
+    within_3d_text = "\n".join(format_session_memory_lines(conn, wa_id, "within_3d", limit=4)) or "（暫時未有三天內記憶）"
+    last_proactive = get_last_proactive_event(conn, wa_id)
+    last_proactive_text = _clean_text((last_proactive or {}).get("body", "")) or "（最近未主動）"
+    prompt = f"""
+你係蘇蘇嘅主動消息決策器。你唔需要寫最終訊息，只判斷此刻應唔應該主動搵對方。
+
+對方名稱：{profile_name or '對方'}
+最近聊天：
+{chr(10).join(history_lines) if history_lines else '（最近未有聊天）'}
+
+24小時內記憶：
+{within_24h_text}
+
+三天內記憶：
+{within_3d_text}
+
+核心檔案：
+{build_core_profile_memory_text(primary_text) if primary_text else '（暫無）'}
+
+候選條件：
+- slot_key: {candidate.get('slot_key')}
+- silence_minutes: {candidate.get('silence_minutes')}
+- daily_count: {candidate.get('daily_count')}
+- slot_rate: {candidate.get('slot_rate')}
+- score: {candidate.get('score')}
+- historical_probability: {candidate.get('probability')}
+- 最近一次主動內容: {last_proactive_text}
+- 時段風格: {style_window_text(now)}
+
+判斷原則：
+- 只喺真係自然、唔打擾、唔重複時先 should_send=true
+- 如果最近剛密集聊天、對方剛忙緊、或者話題 hook 唔夠自然，就 should_send=false
+- 如果要發，topic 只可用短詞，例如 homework / weather / checkin / sleep / food / family / schedule
+- tone 只可用短詞，例如 gentle_checkin / playful / caring / light_flirt / practical
+- 只輸出 JSON：
+{{"should_send": true, "confidence": 0.82, "reason": "...", "topic": "homework", "tone": "gentle_checkin"}}
+""".strip()
+    raw = _generate_router_text(prompt, system_prompt="你係主動消息決策器，只輸出 JSON object。")
+    data = _parse_json_object(raw)
+    if not data:
+        return {"should_send": False, "confidence": 0.0, "reason": "invalid_router_output", "topic": "", "tone": ""}
+    return {
+        "should_send": bool(data.get("should_send")),
+        "confidence": float(data.get("confidence", 0) or 0),
+        "reason": _clean_text(data.get("reason", "")),
+        "topic": _clean_text(data.get("topic", "")),
+        "tone": _clean_text(data.get("tone", "")),
+    }
 
 
 def evaluate_proactive_candidate(conn, wa_id: str, profile_name: str = "", now: Optional[datetime] = None) -> dict:
@@ -650,7 +758,8 @@ def send_proactive_message(conn, candidate: dict, now: Optional[datetime] = None
     now = now or hk_now()
     wa_id = candidate["wa_id"]
     profile_name = candidate.get("profile_name", "")
-    prompt = build_proactive_prompt(conn, wa_id, profile_name, now)
+    llm_decision = candidate.get("llm_decision") or {}
+    prompt = build_proactive_prompt(conn, wa_id, profile_name, now, llm_decision=llm_decision)
     reply = shorten_whatsapp_reply(
         _generate_model_text(
             prompt,
@@ -751,11 +860,18 @@ def run_proactive_scan_once() -> dict:
             candidate = evaluate_proactive_candidate(conn, row["wa_id"], row["profile_name"], now)
             if not candidate.get("eligible"):
                 continue
-            if random.random() >= candidate["probability"]:
+            llm_decision = proactive_llm_decide(conn, candidate, now)
+            candidate["llm_decision"] = llm_decision
+            if not llm_decision.get("should_send"):
                 continue
             result = send_proactive_message(conn, candidate, now)
             if result.get("ok"):
-                triggered.append({"wa_id": row["wa_id"], "probability": candidate["probability"]})
+                triggered.append({
+                    "wa_id": row["wa_id"],
+                    "probability": candidate["probability"],
+                    "llm_confidence": llm_decision.get("confidence", 0),
+                    "topic": llm_decision.get("topic", ""),
+                })
         conn.commit()
         return {"ok": True, "status": "scanned", "checked": checked, "triggered": triggered}
     finally:
