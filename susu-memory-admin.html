@@ -795,6 +795,34 @@
   };
   const SETTINGS_GROUPS = [
     {
+      title: '模型切換',
+      desc: '一鍵切換主聊天模型（Relay），並獨立設定 Cloudflare Anthropic native 搜索模型。',
+      className: 'full',
+      fields: [
+        {
+          key: 'chat_primary_model',
+          label: '主聊天模型（Relay）',
+          type: 'select',
+          options: [
+            { value: 'claude-opus-4-6', label: 'Claude Opus 4.6（預設）' },
+            { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+          ],
+          hint: '只影響普通聊天主鏈路（relay）。',
+        },
+        {
+          key: 'anthropic_search_model',
+          label: '搜索模型（Anthropic Native）',
+          type: 'select',
+          options: [
+            { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6（預設）' },
+            { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+            { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5（兜底）' },
+          ],
+          hint: '只影響 Cloudflare Anthropic native /messages + web_search 搜索回覆。',
+        },
+      ],
+    },
+    {
       title: '人設與核心記憶',
       desc: '這兩段會直接影響苏苏對號主的 system prompt 與長期背景理解。Primary User Memory 會在儲存時自動壓成較精簡的核心檔案。',
       className: 'full',
@@ -826,34 +854,6 @@
         { key: 'proactive_conversation_window_hours', label: '會話窗口（小時）', type: 'number', min: 1, max: 168, hint: '太久沒聊的對話，不會被主動模組重新打開。' },
         { key: 'proactive_max_per_service_day', label: '每日上限', type: 'number', min: 0, max: 20, hint: '以服務日計算，每日最多主動幾次。' },
         { key: 'proactive_min_inbound_messages', label: '最少入站訊息數', type: 'number', min: 1, max: 200, hint: '互動太少的新對話，不會太早主動。' },
-      ],
-    },
-    {
-      title: '模型切換',
-      desc: '一鍵切換主聊天模型（Relay），並獨立設定 Cloudflare Anthropic native 搜索模型。',
-      className: 'full',
-      fields: [
-        {
-          key: 'chat_primary_model',
-          label: '主聊天模型（Relay）',
-          type: 'select',
-          options: [
-            { value: 'claude-opus-4-6', label: 'Claude Opus 4.6（預設）' },
-            { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-          ],
-          hint: '只影響普通聊天主鏈路（relay）。',
-        },
-        {
-          key: 'anthropic_search_model',
-          label: '搜索模型（Anthropic Native）',
-          type: 'select',
-          options: [
-            { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6（預設）' },
-            { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
-            { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5（兜底）' },
-          ],
-          hint: '只影響 Cloudflare Anthropic native /messages + web_search 搜索回覆。',
-        },
       ],
     },
   ];
@@ -1305,7 +1305,12 @@
   function refreshToolbarState() {
     const isSettings = activeTab === 'settings';
     searchInput.disabled = isSettings;
+    searchInput.hidden = isSettings;
     searchInput.placeholder = isSettings ? '苏苏設定頁不支援搜尋' : '搜尋內容、類型、提醒文字...';
+    if (isSettings) {
+      searchInput.value = '';
+      searchText = '';
+    }
   }
 
   function bindSettingsActions() {
