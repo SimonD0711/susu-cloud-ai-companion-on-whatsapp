@@ -812,6 +812,7 @@
           key: 'proactive_enabled',
           label: '主動訊息開關',
           type: 'select',
+          selectKind: 'bool',
           options: [
             { value: '1', label: '啟用' },
             { value: '0', label: '停用' },
@@ -825,6 +826,34 @@
         { key: 'proactive_conversation_window_hours', label: '會話窗口（小時）', type: 'number', min: 1, max: 168, hint: '太久沒聊的對話，不會被主動模組重新打開。' },
         { key: 'proactive_max_per_service_day', label: '每日上限', type: 'number', min: 0, max: 20, hint: '以服務日計算，每日最多主動幾次。' },
         { key: 'proactive_min_inbound_messages', label: '最少入站訊息數', type: 'number', min: 1, max: 200, hint: '互動太少的新對話，不會太早主動。' },
+      ],
+    },
+    {
+      title: '模型切換',
+      desc: '一鍵切換主聊天模型（Relay），並獨立設定 Cloudflare Anthropic native 搜索模型。',
+      className: 'full',
+      fields: [
+        {
+          key: 'chat_primary_model',
+          label: '主聊天模型（Relay）',
+          type: 'select',
+          options: [
+            { value: 'claude-opus-4-6', label: 'Claude Opus 4.6（預設）' },
+            { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+          ],
+          hint: '只影響普通聊天主鏈路（relay）。',
+        },
+        {
+          key: 'anthropic_search_model',
+          label: '搜索模型（Anthropic Native）',
+          type: 'select',
+          options: [
+            { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6（預設）' },
+            { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+            { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5（兜底）' },
+          ],
+          hint: '只影響 Cloudflare Anthropic native /messages + web_search 搜索回覆。',
+        },
       ],
     },
   ];
@@ -873,7 +902,7 @@
       ...options,
     });
     const body = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    if (!r.ok) throw new Error(body.error || body.detail || body.message || `HTTP ${r.status}`);
     return body;
   }
 
@@ -959,7 +988,9 @@
 </div>`;
     }
     if (field.type === 'select') {
-      const current = value ? '1' : '0';
+      const current = field.selectKind === 'bool'
+        ? (value ? '1' : '0')
+        : String(value ?? '');
       return `
 <div class="modal-field">
   <label for="${fieldId}">${esc(field.label)}</label>
@@ -1049,7 +1080,7 @@
   }
 
   function parseSessionLine(line) {
-    const m = String(line || '').match(/^(\d{1,2}:\d{2})\s+(.+)$/);
+    const m = String(line || '').match(/^\[?(\d{1,2}:\d{2})\]?\s+(.+)$/);
     if (!m) return { time: '', text: String(line || '') };
     return { time: m[1], text: m[2] };
   }
@@ -1069,12 +1100,22 @@
   };
 
   window._slEdit = async function(id, lineIndex) {
+    id = Number(id);
+    lineIndex = Number(lineIndex);
+    if (!id || isNaN(lineIndex) || lineIndex < 0) {
+      alert('參數錯誤，請刷新頁面後重試。');
+      return;
+    }
     const cards = document.querySelectorAll('.entry-card');
     let targetCard = null;
     for (const card of cards) {
       if (Number(card.dataset.entryId) === id) { targetCard = card; break; }
     }
-    const lineText = targetCard?.querySelectorAll('.session-line-text')[lineIndex]?.textContent || '';
+    if (!targetCard) { alert('找不到記憶，請刷新頁面。'); return; }
+    const lineEls = [...targetCard.querySelectorAll('.session-line-text')];
+    if (!lineEls.length) { alert('沒有行可以編輯。'); return; }
+    const safeIdx = Math.min(Math.max(0, lineIndex), lineEls.length - 1);
+    const lineText = lineEls[safeIdx]?.textContent || '';
     const parsed = parseSessionLine(lineText);
     const nextTime = prompt('請修改時間（HH:MM）', parsed.time || new Date().toTimeString().slice(0,5));
     if (nextTime === null) return;
@@ -1083,7 +1124,7 @@
     try {
       await apiFetch('/memory/session-line/update', {
         method: 'POST',
-        body: JSON.stringify({ id, line_index: lineIndex, time: nextTime.trim(), text: nextText.trim() }),
+        body: JSON.stringify({ id, line_index: safeIdx, time: nextTime.trim(), text: nextText.trim() }),
       });
       await loadMemory();
     } catch (e) { alert('修改失敗：' + e.message); }
@@ -1091,6 +1132,9 @@
 
   window._slDel = async function(id, lineIndex) {
     if (!confirm('確定刪除這一行記憶？')) return;
+    id = Number(id);
+    lineIndex = Number(lineIndex);
+    if (!id || isNaN(lineIndex) || lineIndex < 0) { alert('參數錯誤，請刷新頁面後重試。'); return; }
     try {
       await apiFetch('/memory/session-line/delete', {
         method: 'POST',
@@ -1111,8 +1155,8 @@
       return `<div class="session-line">
         <div class="session-line-text">${safe}</div>
         <div class="session-line-actions">
-          <button class="session-line-btn" onclick="window._slEdit(${item.id},${idx})" title="編輯這行">✏️</button>
-          <button class="session-line-btn" onclick="window._slDel(${item.id},${idx})" title="刪除這行">🗑️</button>
+          <button class="session-line-btn" onclick="event.stopPropagation();window._slEdit(${item.id},${idx})" title="編輯這行">✏️</button>
+          <button class="session-line-btn" onclick="event.stopPropagation();window._slDel(${item.id},${idx})" title="刪除這行">🗑️</button>
         </div>
       </div>`;
     }).join('');
@@ -1334,7 +1378,6 @@
           await loadMemory();
         } catch (e) { alert('續期失敗：' + e.message); }
       }));
-  }
     document.querySelectorAll('.promote-btn').forEach(btn =>
       btn.addEventListener('click', async () => {
         if (!confirm('確定要將這條歸檔記憶提升為長期記憶嗎？')) return;
@@ -1456,7 +1499,7 @@
         const element = document.getElementById(`setting-${field.key}`);
         if (!element) return;
         if (field.type === 'select') {
-          settings[field.key] = element.value === '1';
+          settings[field.key] = field.selectKind === 'bool' ? element.value === '1' : element.value;
           return;
         }
         if (field.type === 'number') {

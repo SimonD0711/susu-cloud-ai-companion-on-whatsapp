@@ -30,6 +30,18 @@ SESSION_BUCKET_LABELS = {
 SUSU_SETTING_SPECS = {
     "system_persona": {"type": "multiline", "max_length": 12000, "default": "", "required": True},
     "primary_user_memory": {"type": "multiline", "max_length": 12000, "default": "", "required": True},
+    "chat_primary_model": {
+        "type": "text",
+        "default": "claude-opus-4-6",
+        "choices": ["claude-opus-4-6", "claude-sonnet-4-6"],
+        "max_length": 64,
+    },
+    "anthropic_search_model": {
+        "type": "text",
+        "default": "claude-sonnet-4-6",
+        "choices": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5"],
+        "max_length": 64,
+    },
     "proactive_enabled": {"type": "bool", "default": True},
     "proactive_scan_seconds": {"type": "int", "default": int(os.environ.get("WA_PROACTIVE_SCAN_SECONDS", "300")), "min": 60, "max": 3600},
     "proactive_min_silence_minutes": {"type": "int", "default": int(os.environ.get("WA_PROACTIVE_MIN_SILENCE_MINUTES", "45")), "min": 5, "max": 1440},
@@ -183,7 +195,11 @@ def coerce_susu_setting_value(key, raw_value):
         if key == "primary_user_memory":
             return compact_primary_user_memory_text(text)[: spec.get("max_length", 12000)]
         return text
-    return normalize_susu_text(raw_value, default)[: spec.get("max_length", 255)]
+    text = normalize_susu_text(raw_value, default)[: spec.get("max_length", 255)]
+    choices = spec.get("choices") or []
+    if choices and text not in choices:
+        return default
+    return text
 
 
 def serialize_susu_setting_value(key, raw_value):
@@ -658,10 +674,11 @@ def _split_daily_log_lines(content):
         line = raw.strip()
         if not line:
             continue
-        m = re.match(r"^(\d{1,2}:\d{2})\s+(.+)$", line)
+        line = re.sub(r"^\d{2}:\d{2}\s+", "", line)
+        m = re.match(r"^\[(\d{1,2}:\d{2})\]\s+(.+)$", line)
         if m:
             hhmm = _normalize_hhmm(m.group(1))
-            text = susu_clean_text(m.group(2))
+            text = susu_clean_text(m.group(2).strip("[]"))
             if hhmm and text:
                 lines.append((hhmm, text))
         else:
@@ -685,7 +702,7 @@ def _join_daily_log_lines(lines):
         seen.add(key)
         norm.append((n_hhmm, n_text))
     norm.sort(key=lambda x: (x[0], x[1]))
-    parts = [f"{hhmm} {text}" if hhmm != "99:99" else text for hhmm, text in norm]
+    parts = [f"[{hhmm}] {text}" if hhmm != "99:99" else text for hhmm, text in norm]
     return "。".join(parts)
 
 
@@ -726,12 +743,12 @@ def add_session_log_line(entry_id, hhmm, text):
         conn.close()
 
 
-def update_session_log_line(entry_id, line_index, hhmm, text):
+def update_session_log_line(entry_id, line_index, hhmm, text, sort=False):
     entry_id = int(entry_id or 0)
     line_index = int(line_index or -1)
     hhmm = _normalize_hhmm(hhmm)
     text = susu_clean_text(text)
-    if not entry_id or line_index < 0 or not hhmm or not text:
+    if not entry_id or not hhmm or not text:
         return {"ok": False, "detail": "Missing id, line_index, time or text"}
     conn = get_wa_agent_db()
     try:
@@ -739,8 +756,12 @@ def update_session_log_line(entry_id, line_index, hhmm, text):
         if err:
             return err
         lines = _split_daily_log_lines(row["content"])
+        if not lines:
+            return {"ok": False, "detail": "No editable lines"}
+        if line_index < 0:
+            line_index = 0
         if line_index >= len(lines):
-            return {"ok": False, "detail": "line_index out of range"}
+            line_index = len(lines) - 1
         lines[line_index] = (hhmm, text)
         new_content = _join_daily_log_lines(lines)
         conn.execute(
